@@ -200,9 +200,13 @@ model = FastViTModel.load_adapters(base, "my_adapters")
 `ViTConfig.dtype` defaults to `mx.bfloat16`. bf16 has fp32's 8-bit exponent
 range (no overflow NaN even with random init) and 7 mantissa bits — enough
 for ViT fine-tuning and matching the training recipes of Qwen2-VL / UNI2-h /
-SigLIP / DINOv2. Apple Silicon has real hardware-accelerated bf16 matmul
-(M3 Pro peaks at 3.57 TFLOPs fp32 vs 5.14 TFLOPs bf16 on a 4096² square —
-a real 1.44× compute delta, not just a bandwidth trick).
+SigLIP / DINOv2. On Apple Silicon the reduced-precision path is real:
+M3 Pro peaks at 3.57 TFLOPs fp32 vs 5.14 TFLOPs bf16 on a 4096² square, a
+1.44× delta. (Whether this is "native bf16 silicon" or MLX riding the fp16
+ALU with a bf16 dtype wrapper isn't publicly documented — the [Arnaud
+et al. 2025 HPC benchmark](https://arxiv.org/abs/2502.05317) lists only
+fp32/fp16/int8 as natively supported on the M-series GPU. Either way the
+wall-clock win is measurable end-to-end.)
 
 Measured on M3 Pro 18 GB, interleaved A/B, n=60 per variant, LoRA + grad ckpt:
 
@@ -261,17 +265,27 @@ attention — MLP layers hold ~2/3 of ViT params), HuggingFace weight
 conversion, AdamW training loop with cosine / linear / constant LR
 schedules, and the `FastViTModel` Unsloth-style API.
 
-## Roadmap
+## What's Next
 
-- [x] **v0.1** — ViT-B/L/H + LoRA + training pipeline
-- [x] **v0.2** — Gradient checkpointing + gradient accumulation + full fine-tuning + memory reporting
-- [x] **v0.2.1** — M3 Pro 18GB benchmarks + multi-chip comparison
-- [x] **v0.3** — Fused attention path via `mx.fast.scaled_dot_product_attention`
-- [x] **v0.4** — bfloat16 by default (1.26× geometric mean, 50% memory)
-- [ ] **v0.5** — Fused QKV + LoRA autograd, fused SwiGLU MLP (custom `mx.vjp`)
-- [ ] **v0.6** — Multi-resolution + evaluation (linear probe, kNN)
-- [ ] **v0.7** — QLoRA, DoRA, AdaLoRA
-- [ ] **v0.8** — Big model validation on M5 Pro 64GB, model zoo, docs, PyPI
+mlx-vit-tune is a **training** tool. The next step is **deployment** —
+getting the fine-tuned model off MLX and onto the rest of the Apple
+Silicon ML stack (Core ML + ANE) so it can run as a shipped artifact
+instead of staying trapped in a Python process.
+
+**v0.5 — Core ML export.** One-line API (`FastViTModel.to_coreml(model, path)`)
+that merges any LoRA adapters, rebuilds the architecture as a `timm`
+reference model, loads the trained MLX weights into it, traces with
+`torch.jit.trace`, and emits a `.mlpackage` via `coremltools.convert` —
+suitable for `compute_units=ALL` so Core ML routes parts to the Apple
+Neural Engine. Merging LoRA is the right default: Core ML has no concept
+of runtime adapter patching, and a merged model is numerically identical
+to the LoRA forward pass while landing on the ANE cleanly.
+
+**v0.6 — Inference benchmarks on the ANE.** Measure real img/s and
+energy-per-inference on ViT-B, ViT-L, and a pathology foundation model
+(CONCH or UNI) for each Core ML compute-unit setting (`CPU_ONLY`,
+`CPU_AND_GPU`, `ALL`) so we can see where the ANE actually wins on this
+workload vs where it falls back to the GPU.
 
 ## Related Projects
 
