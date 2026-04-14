@@ -7,8 +7,23 @@ From the creator of [LoRA-ViT](https://github.com/JamesQFreeman/LoRA-ViT) — no
 ## Why
 
 - No MLX ViT fine-tuning pipeline exists
-- Apple Silicon's unified memory lets you fine-tune ViT-B/L/H without a cloud GPU
-- 5-20x faster than CPU-only training
+- Apple Silicon's unified memory lets you fine-tune ViT-B/L/H locally
+- 2-3x faster than PyTorch CPU on the same hardware
+
+## Benchmark
+
+**ViT-B/16 · 224x224 · Apple M4 16GB · float32**
+
+![Benchmark](benchmark_results/benchmark.png)
+
+| Batch Size | MLX GPU Inference | MLX GPU Training | PyTorch CPU Inference | PyTorch CPU Training |
+|:---:|:---:|:---:|:---:|:---:|
+| 1 | 51 img/s | 5.6 img/s | 18 img/s | 4.5 img/s |
+| 4 | 61 img/s | 12 img/s | 26 img/s | 8.2 img/s |
+| 8 | 64 img/s | 14 img/s | 27 img/s | 8.0 img/s |
+| 16 | 64 img/s | 16 img/s | 26 img/s | 8.5 img/s |
+
+MLX GPU delivers **2-3x inference** and **up to 1.9x training speedup** over PyTorch CPU on the same chip. Training speedup grows with batch size as the GPU becomes better utilized.
 
 ## Quick Start
 
@@ -21,8 +36,8 @@ from mlx_vit import FastViTModel
 from mlx_vit.data import ImageDataset
 from mlx_vit.trainer import TrainingArgs, train
 
-# Load any ViT (from HuggingFace, local path, or random weights)
-model = FastViTModel.from_pretrained("vit_base_patch16_224", num_classes=2)
+# Load a ViT
+model = FastViTModel.from_pretrained("vit_base_patch16_224", num_classes=10)
 
 # Add LoRA — targets ALL linear layers (Q,K,V,O,fc1,fc2)
 model = FastViTModel.get_lora_model(model, rank=8)
@@ -36,16 +51,24 @@ train(model, train_ds, val_ds, TrainingArgs(
 ))
 ```
 
+## Demo
+
+Run the self-contained demo — no downloads needed:
+
+```bash
+python scripts/demo.py
+```
+
+Creates a synthetic 2-class dataset, fine-tunes ViT-B/16 with LoRA, and saves the adapters.
+
 ## Supported Architectures
 
-| Architecture | Params | LoRA on M4 16GB | LoRA on M5 Pro 64GB |
-|-------------|--------|----------------|-------------------|
-| **ViT-B/16** | 86M | batch 8-16 | batch 32-64 |
-| **ViT-L/16** | 304M | batch 1-2 | batch 32-48 |
-| **ViT-H/14** | 632M | marginal | batch 16-24 |
-| **ViT-H/14 + SwiGLU** | 632-681M | needs v0.2 | batch 16-24 |
-
-All architectures support optional **SwiGLU FFN** and **register tokens**.
+| Architecture | Params | Config |
+|-------------|--------|--------|
+| **ViT-B/16** | 86M | 12 layers, 768 dim, 12 heads |
+| **ViT-L/16** | 304M | 24 layers, 1024 dim, 16 heads |
+| **ViT-H/14** | 632M | 32 layers, 1280 dim, 16 heads |
+| **ViT-H/14 + SwiGLU** | 632-681M | SwiGLU FFN + register tokens |
 
 ## LoRA: Target ALL Layers
 
@@ -68,23 +91,11 @@ model = FastViTModel.get_lora_model(model, rank=8, target_modules="mlp")        
 model = FastViTModel.from_pretrained("vit_base_patch16_224", num_classes=10)
 
 # From HuggingFace (auto-downloads and converts to MLX)
-model = FastViTModel.from_pretrained("MahmoodLab/UNI", num_classes=2, hf_token="hf_xxx")
+model = FastViTModel.from_pretrained("owkin/phikon", num_classes=5, hf_token="hf_xxx")
 
 # From local converted weights
-model = FastViTModel.from_pretrained("/path/to/weights", num_classes=2)
+model = FastViTModel.from_pretrained("/path/to/weights", num_classes=5)
 ```
-
-### Supported HuggingFace Models
-
-| Model | HF ID | Type |
-|-------|-------|------|
-| CONCH | `MahmoodLab/conch` | ViT-B/16 (CoCa) |
-| UNI | `MahmoodLab/UNI` | ViT-L/16 |
-| UNI2-h | `MahmoodLab/UNI2-h` | ViT-H/14 + SwiGLU |
-| Virchow2 | `paige-ai/Virchow2` | ViT-H/14 + SwiGLU |
-| Phikon | `owkin/phikon` | ViT-B/16 |
-
-Any timm-compatible ViT can be converted via `mlx_vit/convert.py`.
 
 ## Dataset Format
 
@@ -92,16 +103,15 @@ Directory structure (ImageFolder style):
 ```
 data/
   train/
-    class_a/
+    cats/
       img001.png
-      img002.jpg
-    class_b/
-      img003.png
+    dogs/
+      img002.png
   val/
-    class_a/
+    cats/
+      img003.png
+    dogs/
       img004.png
-    class_b/
-      img005.png
 ```
 
 Also supports CSV (`image_path,label`) and JSON formats.
@@ -113,7 +123,7 @@ python scripts/train.py \
     --model vit_base_patch16_224 \
     --train_data data/train \
     --val_data data/val \
-    --num_classes 2 \
+    --num_classes 10 \
     --lora --lora_rank 8 \
     --batch_size 8 --lr 1e-4 --epochs 10
 ```
@@ -128,19 +138,9 @@ FastViTModel.save_pretrained(model, "my_adapters")
 FastViTModel.save_pretrained_merged(model, "my_merged_model")
 
 # Load adapters onto a base model
-base = FastViTModel.from_pretrained("vit_base_patch16_224", num_classes=2)
+base = FastViTModel.from_pretrained("vit_base_patch16_224", num_classes=10)
 model = FastViTModel.load_adapters(base, "my_adapters")
 ```
-
-## Performance
-
-Measured on Apple M4 16GB, ViT-B/16, LoRA r=8, 224x224 images:
-
-| Metric | Value |
-|--------|-------|
-| Training throughput | ~16 img/s |
-| Trainable params | 1.57% (1.4M / 87M) |
-| Peak memory | ~3-4 GB |
 
 ## Roadmap
 
@@ -148,15 +148,15 @@ Measured on Apple M4 16GB, ViT-B/16, LoRA r=8, 224x224 images:
 - [ ] **v0.2** — Gradient checkpointing + accumulation
 - [ ] **v0.3** — Fused LoRA autograd (Unsloth-style ~1.5-2x speedup)
 - [ ] **v0.4** — Multi-resolution + evaluation (linear probe, kNN)
-- [ ] **v0.5** — Big model validation (ViT-H on M5 Pro 64GB)
+- [ ] **v0.5** — Big model validation on M-series Pro/Max chips
 - [ ] **v0.6** — QLoRA, DoRA, AdaLoRA
 - [ ] **v0.7** — Model zoo, docs, PyPI
 
 ## Related Projects
 
 - [LoRA-ViT](https://github.com/JamesQFreeman/LoRA-ViT) — LoRA for ViT in PyTorch (by the same author)
-- [mlx-tune](https://github.com/ARahim3/mlx-tune) — LLM fine-tuning on MLX (inspiration for API design)
-- [Unsloth](https://github.com/unslothai/unsloth) — Fast LLM fine-tuning (inspiration for optimization roadmap)
+- [mlx-tune](https://github.com/ARahim3/mlx-tune) — LLM fine-tuning on MLX (API design inspiration)
+- [Unsloth](https://github.com/unslothai/unsloth) — Fast LLM fine-tuning (optimization roadmap inspiration)
 
 ## License
 
