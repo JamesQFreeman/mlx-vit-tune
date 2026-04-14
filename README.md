@@ -15,6 +15,8 @@ From the creator of [LoRA-ViT](https://github.com/JamesQFreeman/LoRA-ViT) — no
 
 All numbers measured on **Apple M4 16GB, float32**.
 
+![Benchmark](benchmark_results/benchmark_v02.png)
+
 ### ViT-B/16 LoRA Training (img/s)
 
 | Batch | CPU | MLX | mlx-vit-tune | Speedup vs CPU |
