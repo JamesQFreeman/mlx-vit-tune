@@ -19,8 +19,12 @@ from mlx_vit.vit import VisionTransformer
 class LoRALinear(nn.Module):
     """Linear layer with LoRA adaptation.
 
-    output = W @ x + (B @ A @ x) * scale
-    where A: [in, rank], B: [rank, out], scale = alpha / rank
+    Using MLX's [..., in] → [..., out] row-vector convention:
+
+        y = x @ W.T + (x @ A) @ B * scale
+
+    where ``A: [in, rank]``, ``B: [rank, out]``, and ``scale = alpha / rank``.
+    The base ``nn.Linear`` is frozen; only ``A`` and ``B`` are trained.
     """
 
     def __init__(
@@ -78,29 +82,6 @@ DEFAULT_TARGET_MODULES = [
 SWIGLU_TARGET_MODULES = DEFAULT_TARGET_MODULES + ["fc1_gate"]
 
 
-def _find_target_modules(model: VisionTransformer, target_modules: list[str]) -> list[tuple[str, nn.Linear]]:
-    """Find all linear layers matching target module names."""
-    targets = []
-    for block_idx, block in enumerate(model.blocks):
-        for name in target_modules:
-            # Navigate the module hierarchy
-            parts = name.split(".")
-            module = block
-            parent = block
-            parent_attr = name
-
-            if name in ("q_proj", "k_proj", "v_proj", "out_proj"):
-                module = getattr(block.attn, name, None)
-                if module is not None:
-                    targets.append((f"blocks.{block_idx}.attn.{name}", module))
-            elif name in ("fc1", "fc2", "fc1_gate"):
-                module = getattr(block.mlp, name, None)
-                if module is not None:
-                    targets.append((f"blocks.{block_idx}.mlp.{name}", module))
-
-    return targets
-
-
 def inject_lora(
     model: VisionTransformer,
     rank: int = 8,
@@ -151,20 +132,6 @@ def inject_lora(
                     num_lora_params += base.weight.shape[1] * rank + rank * base.weight.shape[0]
                     num_replaced += 1
 
-    # Unfreeze LoRA parameters
-    for block in model.blocks:
-        for name in target_modules:
-            if name in ("q_proj", "k_proj", "v_proj", "out_proj"):
-                layer = getattr(block.attn, name, None)
-            elif name in ("fc1", "fc2", "fc1_gate"):
-                layer = getattr(block.mlp, name, None)
-            else:
-                continue
-
-            if isinstance(layer, LoRALinear):
-                layer.lora_a = layer.lora_a  # Mark as trainable by re-setting
-                layer.lora_b = layer.lora_b
-
     # Unfreeze classification head and layer norms
     if model.config.num_classes > 0 and hasattr(model, "head"):
         model.head.unfreeze()
@@ -185,26 +152,6 @@ def inject_lora(
           f"({100 * trainable / total_params:.2f}%)")
 
     return model, trainable
-
-
-def _count_trainable(model: nn.Module) -> int:
-    """Count trainable parameters. LoRA params + unfrozen norms + head."""
-    count = 0
-    # Walk through the model tree
-    for name, param in _iter_params(model):
-        count += param.size
-    return count
-
-
-def _iter_params(module, prefix=""):
-    """Iterate over trainable parameters."""
-    # Check direct parameters
-    if hasattr(module, "lora_a"):
-        yield f"{prefix}.lora_a", module.lora_a
-        yield f"{prefix}.lora_b", module.lora_b
-    # For unfrozen modules, yield their parameters
-    # This is a simplified version - MLX handles trainability through freeze/unfreeze
-    pass
 
 
 def merge_lora(model: VisionTransformer) -> VisionTransformer:

@@ -71,9 +71,9 @@ def report_memory(model: VisionTransformer, batch_size: int, image_size: int = 2
 
     # Force evaluation to get accurate memory reading
     mx.eval(model.parameters())
-    model_mem = mx.metal.get_active_memory()
+    model_mem = mx.get_active_memory()
 
-    device = mx.metal.device_info()
+    device = mx.device_info()
     total_mem = device.get("memory_size", 0)
     # OS + system overhead ~5-6 GB on macOS
     usable_mem = total_mem - 5 * (1024 ** 3) if total_mem > 0 else 0
@@ -99,7 +99,7 @@ def report_memory(model: VisionTransformer, batch_size: int, image_size: int = 2
         print(f"Current batch:   {batch_size}")
     print(f"{'='*60}")
 
-    mx.metal.reset_peak_memory()
+    mx.reset_peak_memory()
 
 
 def cross_entropy_loss(model: VisionTransformer, images: mx.array, labels: mx.array):
@@ -240,9 +240,9 @@ def train(
         avg_acc = epoch_acc / max(epoch_samples, 1)
         peak_mem = ""
         if mx.metal.is_available():
-            peak_gb = mx.metal.get_peak_memory() / (1024**3)
+            peak_gb = mx.get_peak_memory() / (1024**3)
             peak_mem = f" | peak_mem {peak_gb:.2f} GB"
-            mx.metal.reset_peak_memory()
+            mx.reset_peak_memory()
         print(
             f"\nEpoch {epoch+1}/{args.epochs} | "
             f"train_loss {avg_loss:.4f} | "
@@ -304,11 +304,19 @@ def evaluate(
 
 
 def _save_checkpoint(model: VisionTransformer, path: Path, is_lora: bool):
-    """Save model checkpoint."""
+    """Save model checkpoint.
+
+    For full-FT saves: ``model.parameters()`` returns a *nested* dict whose
+    leaves are ``mx.array`` — you can't splat it into ``mx.savez`` directly,
+    that raises ``std::bad_cast``. ``mlx.utils.tree_flatten`` walks the tree
+    and returns a flat ``[(dotted_name, array)]`` list; dict-ing that gives
+    the kwargs ``savez`` actually wants.
+    """
     path.mkdir(parents=True, exist_ok=True)
     if is_lora:
         save_adapters(model, str(path))
     else:
-        weights = dict(model.parameters())
+        flat = mlx.utils.tree_flatten(model.parameters())
+        weights = {name: arr for name, arr in flat if isinstance(arr, mx.array)}
         mx.savez(str(path / "model.npz"), **weights)
     print(f"  Saved checkpoint → {path}")

@@ -1,13 +1,25 @@
 """v0.2 Benchmark: memory + speed across batch sizes, LoRA vs full FT, checkpointing.
 
-Uses REAL pathology-like image patches from confluent_growth_mllm preloaded into
-GPU memory. Since the pool is cached on-device, disk I/O does not affect throughput
-measurements — the benchmark still measures pure forward/backward compute, but with
-real image tensors rather than random noise.
+Benchmarks throughput and peak memory for ViT-B and ViT-L across every
+combination of LoRA / full-FT × gradient checkpointing on/off × several
+batch sizes. Writes a JSON sweep to ``benchmark_results/benchmark_m3pro.json``.
+
+**Image pool**
+By default the benchmark feeds a cached pool of synthetic (random-normal)
+images preloaded on the GPU. To use real images instead, set the environment
+variable ``BENCH_IMAGE_DIR`` to any directory containing ``.jpeg/.jpg/.png``
+files — the pool is normalized with ImageNet stats and cached on-device, so
+disk I/O does not affect the throughput measurement.
+
+The pool being on-device means benchmark numbers are *pure forward/backward
+compute*, regardless of whether the source is random noise or real patches.
 """
 
 import sys
-sys.path.insert(0, ".")
+from pathlib import Path
+
+# Make the repo importable regardless of where the script is invoked from.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gc
 import glob
@@ -30,27 +42,26 @@ from mlx_vit.lora import inject_lora
 from mlx_vit.trainer import cross_entropy_loss
 
 
-# --- Real image pool (loaded once, cached on GPU) ---
-REAL_IMAGE_DIR = "/Users/sheng/project/confluent_growth_data_collection/confluent_growth_mllm/dataset/images"
+# --- Image pool: real jpegs if BENCH_IMAGE_DIR is set, otherwise synthetic ---
+REAL_IMAGE_DIR = os.environ.get("BENCH_IMAGE_DIR", "").strip() or None
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 _REAL_POOL_CACHE: dict = {}
 
 
-def load_real_image_pool(n: int = 64, image_size: int = 224) -> mx.array:
-    """Load `n` real images from the confluent_growth dataset, resize to
-    `image_size`, ImageNet-normalize, and return as a cached mx.array of shape
-    (n, H, W, 3), float32. Cached so we only touch disk once."""
-    key = (n, image_size)
-    if key in _REAL_POOL_CACHE:
-        return _REAL_POOL_CACHE[key]
-
-    paths = sorted(glob.glob(os.path.join(REAL_IMAGE_DIR, "*.jpeg")))
-    if len(paths) < n:
-        raise RuntimeError(f"Only {len(paths)} images in {REAL_IMAGE_DIR}, need {n}")
-
+def _load_pool_from_disk(directory: str, n: int, image_size: int) -> mx.array:
+    patterns = ("*.jpeg", "*.jpg", "*.png")
+    paths: list[str] = []
+    for pat in patterns:
+        paths.extend(glob.glob(os.path.join(directory, pat)))
+    paths.sort()
+    if not paths:
+        raise RuntimeError(
+            f"BENCH_IMAGE_DIR={directory!r} contains no .jpeg/.jpg/.png files."
+        )
+    # If we have fewer than `n`, cycle with replacement rather than erroring.
     rng = random.Random(42)
-    chosen = rng.sample(paths, n)
+    chosen = [paths[rng.randrange(len(paths))] for _ in range(n)]
 
     buf = np.empty((n, image_size, image_size, 3), dtype=np.float32)
     for i, p in enumerate(chosen):
@@ -58,17 +69,37 @@ def load_real_image_pool(n: int = 64, image_size: int = 224) -> mx.array:
         arr = np.asarray(im, dtype=np.float32) / 255.0
         arr = (arr - IMAGENET_MEAN) / IMAGENET_STD
         buf[i] = arr
+    return mx.array(buf)
 
-    pool = mx.array(buf)
+
+def _load_pool_synthetic(n: int, image_size: int) -> mx.array:
+    rng = np.random.default_rng(42)
+    buf = rng.standard_normal((n, image_size, image_size, 3)).astype(np.float32)
+    return mx.array(buf)
+
+
+def load_image_pool(n: int = 64, image_size: int = 224) -> mx.array:
+    """Load (or synthesize) ``n`` images, cache them on the GPU, return as an
+    ``mx.array`` of shape ``(n, H, W, 3)``. Source is controlled by the
+    ``BENCH_IMAGE_DIR`` env var — unset means synthetic."""
+    key = (n, image_size)
+    if key in _REAL_POOL_CACHE:
+        return _REAL_POOL_CACHE[key]
+
+    if REAL_IMAGE_DIR:
+        pool = _load_pool_from_disk(REAL_IMAGE_DIR, n, image_size)
+    else:
+        pool = _load_pool_synthetic(n, image_size)
+
     mx.eval(pool)
     _REAL_POOL_CACHE[key] = pool
     return pool
 
 
 def get_real_batch(batch_size: int, image_size: int = 224) -> mx.array:
-    """Return a batch of `batch_size` real images as an mx.array. Drawn from a
-    cached on-device pool — no disk I/O after first call."""
-    pool = load_real_image_pool(n=max(64, batch_size), image_size=image_size)
+    """Return a batch of ``batch_size`` images as an ``mx.array``, drawn from
+    the cached on-device pool — no disk I/O after the first call."""
+    pool = load_image_pool(n=max(64, batch_size), image_size=image_size)
     idx = mx.array(np.arange(batch_size) % pool.shape[0])
     return pool[idx]
 
@@ -87,8 +118,8 @@ class BenchResult:
 
 def clear_memory():
     gc.collect()
-    mx.metal.clear_cache()
-    mx.metal.reset_peak_memory()
+    mx.clear_cache()
+    mx.reset_peak_memory()
 
 
 def build_model(arch, num_classes, checkpoint):
@@ -117,7 +148,7 @@ def bench_inference(model, batch_size, image_size=224, warmup=5, iters=25):
     # Timed
     times = []
     for _ in range(iters):
-        mx.metal.reset_peak_memory()
+        mx.reset_peak_memory()
         t0 = time.perf_counter()
         out = model(x)
         mx.eval(out)
@@ -125,7 +156,7 @@ def bench_inference(model, batch_size, image_size=224, warmup=5, iters=25):
         times.append(t1 - t0)
 
     avg_time = sum(times) / len(times)
-    peak = mx.metal.get_peak_memory() / (1024 ** 2)
+    peak = mx.get_peak_memory() / (1024 ** 2)
     return batch_size / avg_time, peak
 
 
@@ -145,7 +176,7 @@ def bench_train_step(model, batch_size, num_classes, image_size=224, warmup=5, i
         mx.eval(model.parameters(), optimizer.state)
 
     # Timed
-    mx.metal.reset_peak_memory()
+    mx.reset_peak_memory()
     times = []
     for _ in range(iters):
         t0 = time.perf_counter()
@@ -156,7 +187,7 @@ def bench_train_step(model, batch_size, num_classes, image_size=224, warmup=5, i
         times.append(t1 - t0)
 
     avg_time = sum(times) / len(times)
-    peak = mx.metal.get_peak_memory() / (1024 ** 2)
+    peak = mx.get_peak_memory() / (1024 ** 2)
     return batch_size / avg_time, peak
 
 
@@ -169,7 +200,7 @@ def run_config(arch, mode, checkpoint, batch_size, num_classes=10):
         model, trainable = inject_lora(model, rank=8, alpha=8.0)
 
     mx.eval(model.parameters())
-    model_mem = mx.metal.get_active_memory() / (1024 ** 2)
+    model_mem = mx.get_active_memory() / (1024 ** 2)
 
     label = f"{arch} | {mode:7s} | ckpt={'Y' if checkpoint else 'N'} | bs={batch_size:2d}"
 
@@ -207,7 +238,7 @@ def main():
     print("v0.2 Benchmark: Memory + Speed")
     print("=" * 90)
 
-    device = mx.metal.device_info()
+    device = mx.device_info()
     print(f"Device: {device.get('architecture', '?')}")
     total_mem = device.get("memory_size", 0)
     if total_mem:

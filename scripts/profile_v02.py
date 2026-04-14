@@ -16,7 +16,9 @@ All times are averaged over 20 iterations after 5 warmups.
 """
 
 import sys
-sys.path.insert(0, ".")
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import time
 from dataclasses import dataclass, field
@@ -279,7 +281,7 @@ def main():
     print("v0.3 Profiling — where does time go in a LoRA training step?")
     print("=" * 80)
 
-    device = mx.metal.device_info()
+    device = mx.device_info()
     print(f"Device: {device.get('architecture', '?')}  "
           f"({device.get('memory_size', 0)/1e9:.0f} GB)")
 

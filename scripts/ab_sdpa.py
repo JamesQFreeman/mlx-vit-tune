@@ -2,7 +2,9 @@
 configuration, high statistics, interleaved to wash out thermal/cache effects."""
 
 import sys
-sys.path.insert(0, ".")
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import statistics
 import time
@@ -95,7 +97,7 @@ def main():
     import json
 
     print("Interleaved A/B test: manual attention vs mx.fast.scaled_dot_product_attention")
-    print(f"Device: {mx.metal.device_info().get('architecture', '?')}")
+    print(f"Device: {mx.device_info().get('architecture', '?')}")
 
     results = []
     # Headline configurations. All with gradient checkpointing (the default

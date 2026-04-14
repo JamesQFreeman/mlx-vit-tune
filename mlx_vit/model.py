@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import mlx.core as mx
+import mlx.utils
 
 from mlx_vit.convert import convert_weights, download_and_convert, load_mlx_weights
 from mlx_vit.lora import (
@@ -148,11 +149,12 @@ class FastViTModel:
             model = VisionTransformer(config)
 
             # Load weights (skip classification head if not present in checkpoint)
-            weight_keys = set(weights.keys())
             model_items = [(k, v) for k, v in weights.items()]
             model.load_weights(model_items, strict=False)
 
-            total_params = sum(p.size for _, p in model.parameters().items())
+            # model.parameters() is NESTED — tree_flatten to walk leaves.
+            flat = mlx.utils.tree_flatten(model.parameters())
+            total_params = sum(v.size for _, v in flat if isinstance(v, mx.array))
             print(f"Loaded {model_name_or_path}: {total_params:,} parameters")
             return _cast_model(model, dtype)
 
@@ -223,7 +225,9 @@ class FastViTModel:
         if has_lora:
             save_adapters(model, str(path))
         else:
-            weights = dict(model.parameters())
+            # model.parameters() is nested; savez wants flat name=array kwargs.
+            flat = mlx.utils.tree_flatten(model.parameters())
+            weights = {name: arr for name, arr in flat if isinstance(arr, mx.array)}
             mx.savez(str(path / "model.npz"), **weights)
         print(f"Saved model → {path}")
 
@@ -233,7 +237,8 @@ class FastViTModel:
         model = merge_lora(model)
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
-        weights = dict(model.parameters())
+        flat = mlx.utils.tree_flatten(model.parameters())
+        weights = {name: arr for name, arr in flat if isinstance(arr, mx.array)}
         mx.savez(str(path / "model.npz"), **weights)
         print(f"Saved merged model → {path}")
 
@@ -243,18 +248,39 @@ class FastViTModel:
         return load_adapters(model, path)
 
 
-def _cast_model(model: VisionTransformer, dtype: str) -> VisionTransformer:
-    """Cast model weights to the specified dtype."""
+_DTYPE_ALIASES = {
+    "float16": mx.float16, "fp16": mx.float16, "half": mx.float16,
+    "bfloat16": mx.bfloat16, "bf16": mx.bfloat16,
+    "float32": mx.float32, "fp32": mx.float32, "float": mx.float32,
+}
+
+
+def _resolve_dtype(dtype) -> "mx.Dtype":
+    """Accept a string alias (``'bf16'``, ``'bfloat16'``, ``'fp32'``, ...) or
+    an ``mx.Dtype`` directly, and return the canonical ``mx.Dtype``. Raises
+    ``ValueError`` on unknown input — no silent fallback (this used to be a
+    bug where unknown strings became ``mx.float16``)."""
+    if isinstance(dtype, mx.Dtype):
+        return dtype
+    if isinstance(dtype, str):
+        key = dtype.lower()
+        if key in _DTYPE_ALIASES:
+            return _DTYPE_ALIASES[key]
+        raise ValueError(
+            f"Unknown dtype {dtype!r}. Valid options: "
+            f"{sorted(set(_DTYPE_ALIASES.keys()))}."
+        )
+    raise TypeError(
+        f"dtype must be an mx.Dtype or string alias, got {type(dtype).__name__}"
+    )
+
+
+def _cast_model(model: VisionTransformer, dtype) -> VisionTransformer:
+    """Cast all model weights in-place to ``dtype`` (string alias or mx.Dtype)."""
     import mlx.utils
 
-    dtype_map = {
-        "float16": mx.float16,
-        "bfloat16": mx.bfloat16,
-        "float32": mx.float32,
-    }
-    target = dtype_map.get(dtype, mx.float16)
+    target = _resolve_dtype(dtype)
 
-    # Flatten, cast, and update
     flat = mlx.utils.tree_flatten(model.parameters())
     casted = [
         (k, v.astype(target) if isinstance(v, mx.array) and v.dtype != target else v)

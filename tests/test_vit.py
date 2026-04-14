@@ -2,6 +2,7 @@
 
 import os
 import sys
+from pathlib import Path
 
 # Run from repo root regardless of where pytest/python was invoked.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -256,6 +257,43 @@ def test_gradient_accumulation():
     print(f"[PASS] Gradient accumulation: {len(flat_grads)} gradient tensors, all finite")
 
 
+def test_save_checkpoint_full_ft():
+    """Regression: ``_save_checkpoint`` used to call ``mx.savez(**dict(model.
+    parameters()))`` directly, but ``model.parameters()`` is a NESTED dict
+    whose leaves are mx.array — the splat raised ``std::bad_cast`` at the end
+    of every full-FT epoch. The fix flattens via ``mlx.utils.tree_flatten``
+    before saving; this test reproduces the save path and verifies a round
+    trip succeeds."""
+    import tempfile
+    from mlx_vit.trainer import _save_checkpoint
+
+    config = ViTConfig(
+        patch_size=16, embed_dim=64, depth=2,
+        num_heads=4, num_classes=3, image_size=32,
+    )
+    model = VisionTransformer(config)
+    mx.eval(model.parameters())
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ckpt_path = Path(tmp) / "epoch_1"
+        # This used to raise std::bad_cast on the nested parameters dict.
+        _save_checkpoint(model, ckpt_path, is_lora=False)
+        assert (ckpt_path / "model.npz").exists()
+
+        # Round-trip load, verify shapes and dtypes are preserved.
+        loaded = dict(mx.load(str(ckpt_path / "model.npz")))
+        flat = mlx.utils.tree_flatten(model.parameters())
+        model_dict = {k: v for k, v in flat if isinstance(v, mx.array)}
+        assert set(loaded.keys()) == set(model_dict.keys()), (
+            f"Saved keys differ: only in saved = {set(loaded.keys()) - set(model_dict.keys())}, "
+            f"only in model = {set(model_dict.keys()) - set(loaded.keys())}"
+        )
+        for name, arr in model_dict.items():
+            assert loaded[name].shape == arr.shape, f"{name} shape mismatch"
+
+    print(f"[PASS] Full-FT checkpoint save: {len(model_dict)} tensors round-trip OK")
+
+
 def test_fast_sdpa_matches_manual():
     """v0.3: mx.fast.scaled_dot_product_attention path must produce the same
     logits and (more importantly) the same gradients as the manual path."""
@@ -325,12 +363,12 @@ def test_memory_reporting():
     model = VisionTransformer(config)
     mx.eval(model.parameters())
 
-    active_mem = mx.metal.get_active_memory()
-    peak_mem = mx.metal.get_peak_memory()
+    active_mem = mx.get_active_memory()
+    peak_mem = mx.get_peak_memory()
     assert active_mem > 0, "Active memory should be > 0"
     assert peak_mem > 0, "Peak memory should be > 0"
 
-    device = mx.metal.device_info()
+    device = mx.device_info()
     assert "architecture" in device or "memory_size" in device, "device_info should return useful info"
 
     print(f"[PASS] Memory reporting: active {active_mem / (1024**2):.1f} MB, peak {peak_mem / (1024**2):.1f} MB")
@@ -355,4 +393,7 @@ if __name__ == "__main__":
 
     print("\n--- v0.3 tests ---\n")
     test_fast_sdpa_matches_manual()
+
+    print("\n--- Regressions ---\n")
+    test_save_checkpoint_full_ft()
     print("\nAll tests passed!")
