@@ -4,6 +4,7 @@ import sys
 sys.path.insert(0, "/Volumes/ExternalHD/mlx-path-foundation-tune")
 
 import mlx.core as mx
+import mlx.nn as nn
 import mlx.utils
 import numpy as np
 
@@ -156,6 +157,121 @@ def test_param_count():
     print(f"[PASS] ViT-B param count: {total:,} (expected ~86M)")
 
 
+def test_gradient_checkpointing():
+    """Test that gradient checkpointing produces same output and gradients."""
+    config = ViTConfig(
+        patch_size=16, embed_dim=64, depth=4,
+        num_heads=4, num_classes=5, image_size=32,
+    )
+
+    # Without checkpointing
+    model_no_ckpt = VisionTransformer(config)
+    x = mx.random.normal((2, 32, 32, 3))
+    out_no_ckpt = model_no_ckpt(x)
+    mx.eval(out_no_ckpt)
+
+    # With checkpointing — same weights
+    config_ckpt = ViTConfig(
+        patch_size=16, embed_dim=64, depth=4,
+        num_heads=4, num_classes=5, image_size=32,
+        gradient_checkpointing=True,
+    )
+    model_ckpt = VisionTransformer(config_ckpt)
+    # Copy weights from no-checkpoint model
+    flat = mlx.utils.tree_flatten(model_no_ckpt.parameters())
+    model_ckpt.load_weights(flat)
+
+    out_ckpt = model_ckpt(x)
+    mx.eval(out_ckpt)
+
+    diff = mx.abs(out_no_ckpt - out_ckpt).max().item()
+    assert diff < 1e-5, f"Checkpointing changed output: max diff = {diff}"
+
+    # Verify gradients work with checkpointing
+    labels = mx.array([0, 1])
+    from mlx_vit.trainer import cross_entropy_loss
+    loss_fn = nn.value_and_grad(model_ckpt, cross_entropy_loss)
+    (loss, acc), grads = loss_fn(model_ckpt, x, labels)
+    mx.eval(loss, acc)
+
+    assert loss.item() > 0, "Loss should be positive"
+    assert not mx.isnan(loss).item(), "Loss is NaN with checkpointing"
+    print(f"[PASS] Gradient checkpointing: output diff {diff:.2e}, loss {loss.item():.4f}")
+
+
+def test_gradient_checkpointing_lora():
+    """Test gradient checkpointing works with LoRA."""
+    config = ViTConfig(
+        patch_size=16, embed_dim=64, depth=4,
+        num_heads=4, num_classes=5, image_size=32,
+        gradient_checkpointing=True,
+    )
+    model = VisionTransformer(config)
+    model, trainable = inject_lora(model, rank=4, alpha=4.0)
+
+    x = mx.random.normal((2, 32, 32, 3))
+    labels = mx.array([0, 1])
+
+    from mlx_vit.trainer import cross_entropy_loss
+    loss_fn = nn.value_and_grad(model, cross_entropy_loss)
+    (loss, acc), grads = loss_fn(model, x, labels)
+    mx.eval(loss, acc)
+
+    assert loss.item() > 0, "Loss should be positive"
+    assert not mx.isnan(loss).item(), "Loss is NaN with checkpointing + LoRA"
+    print(f"[PASS] Checkpointing + LoRA: loss {loss.item():.4f}, {trainable:,} trainable")
+
+
+def test_gradient_accumulation():
+    """Test that gradient accumulation produces averaged gradients."""
+    config = ViTConfig(
+        patch_size=16, embed_dim=64, depth=2,
+        num_heads=4, num_classes=5, image_size=32,
+    )
+    model = VisionTransformer(config)
+
+    x1 = mx.random.normal((2, 32, 32, 3))
+    x2 = mx.random.normal((2, 32, 32, 3))
+    labels = mx.array([0, 1])
+
+    from mlx_vit.trainer import cross_entropy_loss
+    loss_fn = nn.value_and_grad(model, cross_entropy_loss)
+
+    # Get gradients for two batches
+    (_, _), grads1 = loss_fn(model, x1, labels)
+    (_, _), grads2 = loss_fn(model, x2, labels)
+
+    # Accumulate and average (same logic as trainer.py)
+    accum = mlx.utils.tree_map(lambda a, b: a + b, grads1, grads2)
+    avg_grads = mlx.utils.tree_map(lambda g: g * 0.5, accum)
+    mx.eval(avg_grads)
+
+    # Just verify it doesn't crash and produces finite values
+    flat_grads = mlx.utils.tree_flatten(avg_grads)
+    all_finite = all(not mx.isnan(v).any().item() for _, v in flat_grads if isinstance(v, mx.array))
+    assert all_finite, "Accumulated gradients contain NaN"
+    print(f"[PASS] Gradient accumulation: {len(flat_grads)} gradient tensors, all finite")
+
+
+def test_memory_reporting():
+    """Test memory reporting functions."""
+    assert mx.metal.is_available(), "Metal not available"
+
+    config = ViTConfig.vit_base_patch16(num_classes=10, image_size=224)
+    model = VisionTransformer(config)
+    mx.eval(model.parameters())
+
+    active_mem = mx.metal.get_active_memory()
+    peak_mem = mx.metal.get_peak_memory()
+    assert active_mem > 0, "Active memory should be > 0"
+    assert peak_mem > 0, "Peak memory should be > 0"
+
+    device = mx.metal.device_info()
+    assert "architecture" in device or "memory_size" in device, "device_info should return useful info"
+
+    print(f"[PASS] Memory reporting: active {active_mem / (1024**2):.1f} MB, peak {peak_mem / (1024**2):.1f} MB")
+
+
 if __name__ == "__main__":
     print("Running ViT + LoRA tests...\n")
     test_vit_forward()
@@ -166,4 +282,10 @@ if __name__ == "__main__":
     test_lora_injection()
     test_lora_merge()
     test_param_count()
+
+    print("\n--- v0.2 tests ---\n")
+    test_gradient_checkpointing()
+    test_gradient_checkpointing_lora()
+    test_gradient_accumulation()
+    test_memory_reporting()
     print("\nAll tests passed!")

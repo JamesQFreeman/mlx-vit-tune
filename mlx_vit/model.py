@@ -63,6 +63,7 @@ class FastViTModel:
         hf_token: Optional[str] = None,
         cache_dir: Optional[str] = None,
         dtype: str = "float32",
+        gradient_checkpointing: bool = False,
     ) -> VisionTransformer:
         """Load a pretrained ViT model.
 
@@ -94,6 +95,7 @@ class FastViTModel:
             weights, config = load_mlx_weights(str(local_path))
             config.num_classes = num_classes
             config.image_size = image_size
+            config.gradient_checkpointing = gradient_checkpointing
             model = VisionTransformer(config)
             model.load_weights(list(weights.items()))
             return _cast_model(model, dtype)
@@ -101,7 +103,10 @@ class FastViTModel:
         # Case 2: Architecture name (random weights)
         if model_name_or_path in MODEL_CONFIGS:
             print(f"Creating model with random weights: {model_name_or_path}")
-            model = create_vit(model_name_or_path, num_classes=num_classes, image_size=image_size)
+            model = create_vit(
+                model_name_or_path, num_classes=num_classes,
+                image_size=image_size, gradient_checkpointing=gradient_checkpointing,
+            )
             return _cast_model(model, dtype)
 
         # Case 3: HuggingFace model ID
@@ -120,7 +125,10 @@ class FastViTModel:
 
             # Create config
             config_fn = MODEL_CONFIGS[arch]
-            config = config_fn(num_classes=num_classes, image_size=image_size)
+            config = config_fn(
+                num_classes=num_classes, image_size=image_size,
+                gradient_checkpointing=gradient_checkpointing,
+            )
 
             # Determine cache directory
             if cache_dir is None:

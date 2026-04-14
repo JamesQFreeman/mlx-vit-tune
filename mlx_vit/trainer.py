@@ -13,6 +13,7 @@ from typing import Optional
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
+import mlx.utils
 import numpy as np
 
 from mlx_vit.data import ImageDataset, create_batches
@@ -60,6 +61,45 @@ def _linear_schedule(step: int, total_steps: int, warmup_steps: int, base_lr: fl
         return base_lr * step / max(warmup_steps, 1)
     progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
     return base_lr * (1.0 - progress)
+
+
+def report_memory(model: VisionTransformer, batch_size: int, image_size: int = 224):
+    """Report memory usage and suggest batch size."""
+    if not mx.metal.is_available():
+        print("Metal not available — skipping memory report")
+        return
+
+    # Force evaluation to get accurate memory reading
+    mx.eval(model.parameters())
+    model_mem = mx.metal.get_active_memory()
+
+    device = mx.metal.device_info()
+    total_mem = device.get("memory_size", 0)
+    # OS + system overhead ~5-6 GB on macOS
+    usable_mem = total_mem - 5 * (1024 ** 3) if total_mem > 0 else 0
+
+    print(f"\n{'='*60}")
+    print(f"Memory Report")
+    print(f"{'='*60}")
+    print(f"Device:          {device.get('architecture', 'Unknown')}")
+    if total_mem > 0:
+        print(f"Total memory:    {total_mem / (1024**3):.1f} GB")
+        print(f"Usable (est):    {usable_mem / (1024**3):.1f} GB")
+    print(f"Model memory:    {model_mem / (1024**3):.2f} GB")
+
+    if usable_mem > 0:
+        # Rough estimate: each image in a batch takes ~4x the forward pass memory
+        # (activations + gradients + optimizer states)
+        per_image_est = (model_mem * 3) / 197  # rough per-token estimate
+        remaining = usable_mem - model_mem
+        if remaining > 0:
+            suggested = max(1, int(remaining / (image_size * image_size * 3 * 4 * 4 / (1024**2))))
+            suggested = min(suggested, 64)  # cap at 64
+            print(f"Available:       {remaining / (1024**3):.1f} GB")
+        print(f"Current batch:   {batch_size}")
+    print(f"{'='*60}")
+
+    mx.metal.reset_peak_memory()
 
 
 def cross_entropy_loss(model: VisionTransformer, images: mx.array, labels: mx.array):
@@ -111,7 +151,10 @@ def train(
     print(f"LR schedule:     {args.lr_schedule}")
     print(f"Weight decay:    {args.weight_decay}")
     print(f"Output dir:      {output_dir}")
-    print(f"{'='*60}\n")
+    print(f"Grad checkpoint: {getattr(model.config, 'gradient_checkpointing', False)}")
+    print(f"{'='*60}")
+
+    report_memory(model, args.batch_size, model.config.image_size)
 
     # Optimizer
     optimizer = optim.AdamW(learning_rate=args.lr, weight_decay=args.weight_decay)
@@ -152,12 +195,12 @@ def train(
                 if accum_grads is None:
                     accum_grads = grads
                 else:
-                    accum_grads = mx.tree_map(lambda a, b: a + b, accum_grads, grads)
+                    accum_grads = mlx.utils.tree_map(lambda a, b: a + b, accum_grads, grads)
 
                 if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
                     # Average accumulated gradients
                     scale = 1.0 / args.gradient_accumulation_steps
-                    accum_grads = mx.tree_map(lambda g: g * scale, accum_grads)
+                    accum_grads = mlx.utils.tree_map(lambda g: g * scale, accum_grads)
                     optimizer.update(model, accum_grads)
                     accum_grads = None
                     mx.eval(model.parameters(), optimizer.state)
@@ -195,11 +238,16 @@ def train(
         epoch_time = time.time() - epoch_start
         avg_loss = epoch_loss / max(epoch_samples, 1)
         avg_acc = epoch_acc / max(epoch_samples, 1)
+        peak_mem = ""
+        if mx.metal.is_available():
+            peak_gb = mx.metal.get_peak_memory() / (1024**3)
+            peak_mem = f" | peak_mem {peak_gb:.2f} GB"
+            mx.metal.reset_peak_memory()
         print(
             f"\nEpoch {epoch+1}/{args.epochs} | "
             f"train_loss {avg_loss:.4f} | "
             f"train_acc {avg_acc:.3f} | "
-            f"time {epoch_time:.1f}s"
+            f"time {epoch_time:.1f}s{peak_mem}"
         )
 
         # Validation

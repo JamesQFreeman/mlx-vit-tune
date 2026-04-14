@@ -1,6 +1,6 @@
 # mlx-vit-tune
 
-Fine-tune Vision Transformers on Apple Silicon with MLX. An Unsloth-like API for ViT.
+Fine-tune Vision Transformers on Apple Silicon with MLX. LoRA and full fine-tuning with an Unsloth-like API.
 
 From the creator of [LoRA-ViT](https://github.com/JamesQFreeman/LoRA-ViT) — now natively on Mac.
 
@@ -8,22 +8,56 @@ From the creator of [LoRA-ViT](https://github.com/JamesQFreeman/LoRA-ViT) — no
 
 - No MLX ViT fine-tuning pipeline exists
 - Apple Silicon's unified memory lets you fine-tune ViT-B/L/H locally
-- 2-3x faster than PyTorch CPU on the same hardware
+- Gradient checkpointing makes LoRA 2x faster and uses 80% less memory
+- Supports both LoRA and full fine-tuning
 
 ## Benchmark
 
-**ViT-B/16 · 224x224 · Apple M4 16GB · float32**
+All numbers measured on **Apple M4 16GB, float32**.
 
-![Benchmark](benchmark_results/benchmark.png)
+### ViT-B/16 LoRA Training (img/s)
 
-| Batch Size | MLX GPU Inference | MLX GPU Training | PyTorch CPU Inference | PyTorch CPU Training |
+| Batch | CPU | MLX | mlx-vit-tune | Speedup vs CPU |
 |:---:|:---:|:---:|:---:|:---:|
-| 1 | 51 img/s | 5.6 img/s | 18 img/s | 4.5 img/s |
-| 4 | 61 img/s | 12 img/s | 26 img/s | 8.2 img/s |
-| 8 | 64 img/s | 14 img/s | 27 img/s | 8.0 img/s |
-| 16 | 64 img/s | 16 img/s | 26 img/s | 8.5 img/s |
+| 1 | 4.5 | 11.9 | **23.5** | **5.2x** |
+| 4 | 8.2 | 16.6 | **34.9** | **4.3x** |
+| 8 | 8.0 | 17.2 | **36.3** | **4.5x** |
+| 16 | 8.5 | 17.5 | **39.8** | **4.7x** |
+| 32 | — | 17.6 | **37.6** | — |
 
-MLX GPU delivers **2-3x inference** and **up to 1.9x training speedup** over PyTorch CPU on the same chip. Training speedup grows with batch size as the GPU becomes better utilized.
+> **CPU** = PyTorch on CPU. **MLX** = vanilla MLX, no checkpointing. **mlx-vit-tune** = MLX + gradient checkpointing.
+
+### ViT-B/16 Full Fine-Tuning (img/s)
+
+| Batch | MLX | mlx-vit-tune | Peak Memory |
+|:---:|:---:|:---:|:---:|
+| 1 | 5.8 | 5.4 | 1.9 GB |
+| 8 | 14.4 | 14.0 | 1.9 GB |
+| 16 | 15.3 | 15.3 | 1.9 GB |
+| 32 | 15.8 | **15.9** | **2.8 GB** |
+
+> Full FT speed is similar with or without checkpointing, but memory drops dramatically at large batches (8.3 GB &rarr; 2.9 GB at batch 32).
+
+### Peak Memory (MB) — LoRA
+
+| Batch | MLX | mlx-vit-tune | Saved |
+|:---:|:---:|:---:|:---:|
+| 1 | 573 | **372** | 35% |
+| 4 | 1,256 | **451** | 64% |
+| 8 | 2,165 | **557** | 74% |
+| 16 | 3,982 | **768** | 81% |
+| 32 | 7,615 | **1,190** | 84% |
+
+### ViT-L/16 LoRA — Now Trainable on 16GB
+
+| Batch | MLX (img/s) | mlx-vit-tune (img/s) | MLX Peak | mlx-vit-tune Peak |
+|:---:|:---:|:---:|:---:|:---:|
+| 1 | 4.2 | **8.3** | 1,756 MB | **1,241 MB** |
+| 2 | 5.1 | **10.5** | 2,311 MB | **1,269 MB** |
+| 4 | 5.5 | **11.6** | 3,419 MB | **1,339 MB** |
+| 8 | 5.6 | **12.4** | 5,639 MB | **1,479 MB** |
+
+ViT-L with 304M parameters trains comfortably at batch 8, using under 1.5 GB peak memory with gradient checkpointing.
 
 ## Quick Start
 
@@ -36,11 +70,17 @@ from mlx_vit import FastViTModel
 from mlx_vit.data import ImageDataset
 from mlx_vit.trainer import TrainingArgs, train
 
-# Load a ViT
-model = FastViTModel.from_pretrained("vit_base_patch16_224", num_classes=10)
+# Load a ViT with gradient checkpointing (2x faster LoRA, 80% less memory)
+model = FastViTModel.from_pretrained(
+    "vit_base_patch16_224", num_classes=10,
+    gradient_checkpointing=True,
+)
 
-# Add LoRA — targets ALL linear layers (Q,K,V,O,fc1,fc2)
+# LoRA fine-tuning — targets ALL linear layers (Q,K,V,O,fc1,fc2)
 model = FastViTModel.get_lora_model(model, rank=8)
+
+# Or skip LoRA for full fine-tuning — just train directly
+# model = FastViTModel.from_pretrained("vit_base_patch16_224", num_classes=10)
 
 # Train
 train_ds = ImageDataset("data/train", image_size=224, augment=True)
@@ -145,7 +185,7 @@ model = FastViTModel.load_adapters(base, "my_adapters")
 ## Roadmap
 
 - [x] **v0.1** — ViT-B/L/H + LoRA + training pipeline
-- [ ] **v0.2** — Gradient checkpointing + accumulation
+- [x] **v0.2** — Gradient checkpointing + gradient accumulation + full fine-tuning + memory reporting
 - [ ] **v0.3** — Fused LoRA autograd (Unsloth-style ~1.5-2x speedup)
 - [ ] **v0.4** — Multi-resolution + evaluation (linear probe, kNN)
 - [ ] **v0.5** — Big model validation on M-series Pro/Max chips

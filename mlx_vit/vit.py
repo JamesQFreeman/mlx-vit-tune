@@ -28,6 +28,7 @@ class ViTConfig:
     class_token: bool = True
     global_pool: str = "token"  # "token" (CLS), "avg", "token+avg" (Virchow2)
     drop_rate: float = 0.0
+    gradient_checkpointing: bool = False
 
     @classmethod
     def vit_base_patch16(cls, **kwargs) -> "ViTConfig":
@@ -314,7 +315,10 @@ class VisionTransformer(nn.Module):
 
         # Transformer blocks
         for block in self.blocks:
-            x = block(x)
+            if self.config.gradient_checkpointing:
+                x = mx.checkpoint(block)(x)
+            else:
+                x = block(x)
 
         x = self.norm(x)
         return self._pool(x)
