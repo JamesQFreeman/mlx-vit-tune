@@ -188,9 +188,10 @@ model = FastViTModel.load_adapters(base, "my_adapters")
 
 - [x] **v0.1** — ViT-B/L/H + LoRA + training pipeline
 - [x] **v0.2** — Gradient checkpointing + gradient accumulation + full fine-tuning + memory reporting
+- [ ] **v0.2.1** — M3 Pro 18GB benchmarks + multi-chip comparison
 - [ ] **v0.3** — Fused LoRA autograd (Unsloth-style ~1.5-2x speedup)
 - [ ] **v0.4** — Multi-resolution + evaluation (linear probe, kNN)
-- [ ] **v0.5** — Big model validation on M-series Pro/Max chips
+- [ ] **v0.5** — Big model validation on M5 Pro 64GB + M3 Pro 18GB
 - [ ] **v0.6** — QLoRA, DoRA, AdaLoRA
 - [ ] **v0.7** — Model zoo, docs, PyPI
 
