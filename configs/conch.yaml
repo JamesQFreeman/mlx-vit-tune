@@ -1,0 +1,31 @@
+# CONCH ViT-B/16 — Mahmood Lab pathology foundation model
+model:
+  name: "MahmoodLab/conch"
+  arch: "vit_base_patch16_224"
+  image_size: 224
+  patch_size: 16
+  embed_dim: 768
+  depth: 12
+  num_heads: 12
+  mlp_ratio: 4.0
+  num_classes: 2
+
+lora:
+  rank: 8
+  alpha: 8
+  dropout: 0.0
+  target_modules: "all"  # Q,K,V,O,fc1,fc2
+
+training:
+  batch_size: 8
+  lr: 1.0e-4
+  epochs: 10
+  weight_decay: 0.01
+  warmup_steps: 100
+  lr_schedule: "cosine"
+  gradient_accumulation_steps: 1
+
+data:
+  image_size: 224
+  normalize: "imagenet"
+  augment: true

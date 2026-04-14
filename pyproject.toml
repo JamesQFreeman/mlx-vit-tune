@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlx-vit-tune"
+version = "0.1.0"
+description = "Fine-tune Vision Transformers on Apple Silicon with MLX"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = [
+    "mlx>=0.20",
+    "numpy",
+    "pillow",
+    "safetensors",
+    "huggingface_hub",
+    "tqdm",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "timm", "torch"]
+
+[tool.setuptools.packages.find]
+include = ["mlx_vit*"]
