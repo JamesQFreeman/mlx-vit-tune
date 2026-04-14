@@ -13,7 +13,8 @@ From the creator of [LoRA-ViT](https://github.com/JamesQFreeman/LoRA-ViT) — no
 
 ## Benchmark
 
-All numbers measured on **Apple M4 16GB, float32**.
+ViT-B and ViT-L tables below measured on **Apple M4 16GB, float32**. A
+multi-chip comparison vs **Apple M3 Pro 18GB** follows.
 
 ![Benchmark](benchmark_results/benchmark_v02.png)
 
@@ -60,6 +61,17 @@ All numbers measured on **Apple M4 16GB, float32**.
 | 8 | 5.6 | **12.4** | 5,639 MB | **1,479 MB** |
 
 ViT-L with 304M parameters trains comfortably at batch 8, using under 1.5 GB peak memory with gradient checkpointing.
+
+### Multi-Chip Comparison: M4 16GB vs M3 Pro 18GB
+
+![Comparison](benchmark_results/benchmark_comparison.png)
+
+The M3 Pro's wider GPU (14 cores vs 10) and faster memory bus (150 GB/s vs 120 GB/s)
+deliver a consistent **1.5–1.6× speedup** across every configuration. The extra 2 GB
+of unified memory also lets ViT-L Full FT run at batch 8 without thrashing — on the
+M4 the same config collapses to 0.1 img/s, on the M3 Pro it stays clean at 6.8 img/s.
+M3 Pro numbers were measured with real 512×512 patches from a cell-growth dataset,
+preloaded into GPU memory so disk I/O does not contaminate the throughput.
 
 ## Quick Start
 
@@ -188,7 +200,7 @@ model = FastViTModel.load_adapters(base, "my_adapters")
 
 - [x] **v0.1** — ViT-B/L/H + LoRA + training pipeline
 - [x] **v0.2** — Gradient checkpointing + gradient accumulation + full fine-tuning + memory reporting
-- [ ] **v0.2.1** — M3 Pro 18GB benchmarks + multi-chip comparison
+- [x] **v0.2.1** — M3 Pro 18GB benchmarks + multi-chip comparison
 - [ ] **v0.3** — Fused LoRA autograd (Unsloth-style ~1.5-2x speedup)
 - [ ] **v0.4** — Multi-resolution + evaluation (linear probe, kNN)
 - [ ] **v0.5** — Big model validation on M5 Pro 64GB + M3 Pro 18GB

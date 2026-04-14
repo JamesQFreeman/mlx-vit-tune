@@ -1,12 +1,24 @@
-"""v0.2 Benchmark: memory + speed across batch sizes, LoRA vs full FT, checkpointing."""
+"""v0.2 Benchmark: memory + speed across batch sizes, LoRA vs full FT, checkpointing.
+
+Uses REAL pathology-like image patches from confluent_growth_mllm preloaded into
+GPU memory. Since the pool is cached on-device, disk I/O does not affect throughput
+measurements — the benchmark still measures pure forward/backward compute, but with
+real image tensors rather than random noise.
+"""
 
 import sys
-sys.path.insert(0, "/Volumes/ExternalHD/mlx-path-foundation-tune")
+sys.path.insert(0, ".")
 
 import gc
+import glob
 import json
+import os
+import random
 import time
 from dataclasses import dataclass
+
+import numpy as np
+from PIL import Image
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -16,6 +28,49 @@ import mlx.utils
 from mlx_vit.vit import VisionTransformer, ViTConfig
 from mlx_vit.lora import inject_lora
 from mlx_vit.trainer import cross_entropy_loss
+
+
+# --- Real image pool (loaded once, cached on GPU) ---
+REAL_IMAGE_DIR = "/Users/sheng/project/confluent_growth_data_collection/confluent_growth_mllm/dataset/images"
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+_REAL_POOL_CACHE: dict = {}
+
+
+def load_real_image_pool(n: int = 64, image_size: int = 224) -> mx.array:
+    """Load `n` real images from the confluent_growth dataset, resize to
+    `image_size`, ImageNet-normalize, and return as a cached mx.array of shape
+    (n, H, W, 3), float32. Cached so we only touch disk once."""
+    key = (n, image_size)
+    if key in _REAL_POOL_CACHE:
+        return _REAL_POOL_CACHE[key]
+
+    paths = sorted(glob.glob(os.path.join(REAL_IMAGE_DIR, "*.jpeg")))
+    if len(paths) < n:
+        raise RuntimeError(f"Only {len(paths)} images in {REAL_IMAGE_DIR}, need {n}")
+
+    rng = random.Random(42)
+    chosen = rng.sample(paths, n)
+
+    buf = np.empty((n, image_size, image_size, 3), dtype=np.float32)
+    for i, p in enumerate(chosen):
+        im = Image.open(p).convert("RGB").resize((image_size, image_size), Image.BILINEAR)
+        arr = np.asarray(im, dtype=np.float32) / 255.0
+        arr = (arr - IMAGENET_MEAN) / IMAGENET_STD
+        buf[i] = arr
+
+    pool = mx.array(buf)
+    mx.eval(pool)
+    _REAL_POOL_CACHE[key] = pool
+    return pool
+
+
+def get_real_batch(batch_size: int, image_size: int = 224) -> mx.array:
+    """Return a batch of `batch_size` real images as an mx.array. Drawn from a
+    cached on-device pool — no disk I/O after first call."""
+    pool = load_real_image_pool(n=max(64, batch_size), image_size=image_size)
+    idx = mx.array(np.arange(batch_size) % pool.shape[0])
+    return pool[idx]
 
 
 @dataclass
@@ -51,7 +106,7 @@ def build_model(arch, num_classes, checkpoint):
 
 
 def bench_inference(model, batch_size, image_size=224, warmup=3, iters=10):
-    x = mx.random.normal((batch_size, image_size, image_size, 3))
+    x = get_real_batch(batch_size, image_size)
     mx.eval(x)
 
     # Warmup
@@ -77,7 +132,7 @@ def bench_inference(model, batch_size, image_size=224, warmup=3, iters=10):
 def bench_train_step(model, batch_size, num_classes, image_size=224, warmup=3, iters=10):
     loss_fn = nn.value_and_grad(model, cross_entropy_loss)
 
-    x = mx.random.normal((batch_size, image_size, image_size, 3))
+    x = get_real_batch(batch_size, image_size)
     labels = mx.random.randint(0, num_classes, (batch_size,))
     mx.eval(x, labels)
 
@@ -157,6 +212,11 @@ def main():
     total_mem = device.get("memory_size", 0)
     if total_mem:
         print(f"Total memory: {total_mem / (1024**3):.0f} GB")
+
+    # Preload real image pool once, on GPU, at max batch size.
+    print(f"Loading real image pool from {REAL_IMAGE_DIR} ...")
+    pool = load_real_image_pool(n=64, image_size=224)
+    print(f"Real image pool: {pool.shape} {pool.dtype} — preloaded on device")
     print()
 
     results = []
@@ -217,7 +277,8 @@ def main():
         }
         for r in results
     ]
-    out_path = "/Volumes/ExternalHD/mlx-path-foundation-tune/benchmark_results/benchmark_v02.json"
+    out_path = "benchmark_results/benchmark_m3pro.json"
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(raw, f, indent=2)
     print(f"\nRaw results saved to {out_path}")
