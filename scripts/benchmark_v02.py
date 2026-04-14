@@ -105,7 +105,7 @@ def build_model(arch, num_classes, checkpoint):
     return VisionTransformer(config)
 
 
-def bench_inference(model, batch_size, image_size=224, warmup=3, iters=10):
+def bench_inference(model, batch_size, image_size=224, warmup=5, iters=25):
     x = get_real_batch(batch_size, image_size)
     mx.eval(x)
 
@@ -129,7 +129,7 @@ def bench_inference(model, batch_size, image_size=224, warmup=3, iters=10):
     return batch_size / avg_time, peak
 
 
-def bench_train_step(model, batch_size, num_classes, image_size=224, warmup=3, iters=10):
+def bench_train_step(model, batch_size, num_classes, image_size=224, warmup=5, iters=25):
     loss_fn = nn.value_and_grad(model, cross_entropy_loss)
 
     x = get_real_batch(batch_size, image_size)

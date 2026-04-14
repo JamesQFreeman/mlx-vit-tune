@@ -1,7 +1,10 @@
 """Basic tests for ViT architecture and LoRA."""
 
+import os
 import sys
-sys.path.insert(0, "/Volumes/ExternalHD/mlx-path-foundation-tune")
+
+# Run from repo root regardless of where pytest/python was invoked.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -253,6 +256,67 @@ def test_gradient_accumulation():
     print(f"[PASS] Gradient accumulation: {len(flat_grads)} gradient tensors, all finite")
 
 
+def test_fast_sdpa_matches_manual():
+    """v0.3: mx.fast.scaled_dot_product_attention path must produce the same
+    logits and (more importantly) the same gradients as the manual path."""
+    # Small ViT so the test is fast but still exercises multi-head attention
+    # and gradient checkpointing.
+    cfg_kwargs = dict(
+        patch_size=16, embed_dim=64, depth=3,
+        num_heads=4, num_classes=5, image_size=32,
+        gradient_checkpointing=True,
+    )
+
+    model_manual = VisionTransformer(ViTConfig(use_fast_sdpa=False, **cfg_kwargs))
+    model_fast   = VisionTransformer(ViTConfig(use_fast_sdpa=True,  **cfg_kwargs))
+
+    # Copy weights from manual into fast so both models start identical.
+    flat = mlx.utils.tree_flatten(model_manual.parameters())
+    model_fast.load_weights(flat)
+
+    x = mx.random.normal((2, 32, 32, 3))
+    labels = mx.array([0, 1])
+    mx.eval(x, labels)
+
+    # --- Forward match ---
+    out_m = model_manual(x)
+    out_f = model_fast(x)
+    mx.eval(out_m, out_f)
+    fwd_diff = mx.abs(out_m - out_f).max().item()
+    # Small numerical diff from the reduction order inside the Metal kernel
+    # is acceptable (MLX's fast softmax runs in fp32).
+    assert fwd_diff < 1e-4, f"Fast SDPA forward diverged: max diff = {fwd_diff}"
+
+    # --- Gradient match ---
+    from mlx_vit.trainer import cross_entropy_loss
+    (loss_m, _), grads_m = nn.value_and_grad(model_manual, cross_entropy_loss)(
+        model_manual, x, labels
+    )
+    (loss_f, _), grads_f = nn.value_and_grad(model_fast, cross_entropy_loss)(
+        model_fast, x, labels
+    )
+    mx.eval(loss_m, loss_f, grads_m, grads_f)
+
+    loss_diff = abs(loss_m.item() - loss_f.item())
+    assert loss_diff < 1e-4, f"Fast SDPA loss diverged: diff = {loss_diff}"
+
+    flat_m = dict(mlx.utils.tree_flatten(grads_m))
+    flat_f = dict(mlx.utils.tree_flatten(grads_f))
+    assert set(flat_m.keys()) == set(flat_f.keys())
+    max_grad_diff = 0.0
+    for k, gm in flat_m.items():
+        gf = flat_f[k]
+        if gm.size == 0:
+            continue
+        d = mx.abs(gm - gf).max().item()
+        if d > max_grad_diff:
+            max_grad_diff = d
+    assert max_grad_diff < 1e-4, f"Fast SDPA grads diverged: max diff = {max_grad_diff}"
+
+    print(f"[PASS] Fast SDPA matches manual: "
+          f"fwd {fwd_diff:.2e}, loss {loss_diff:.2e}, grad {max_grad_diff:.2e}")
+
+
 def test_memory_reporting():
     """Test memory reporting functions."""
     assert mx.metal.is_available(), "Metal not available"
@@ -288,4 +352,7 @@ if __name__ == "__main__":
     test_gradient_checkpointing_lora()
     test_gradient_accumulation()
     test_memory_reporting()
+
+    print("\n--- v0.3 tests ---\n")
+    test_fast_sdpa_matches_manual()
     print("\nAll tests passed!")

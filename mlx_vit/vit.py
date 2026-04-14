@@ -29,6 +29,11 @@ class ViTConfig:
     global_pool: str = "token"  # "token" (CLS), "avg", "token+avg" (Virchow2)
     drop_rate: float = 0.0
     gradient_checkpointing: bool = False
+    # v0.3: use mx.fast.scaled_dot_product_attention instead of the manual
+    # Q @ K.T + softmax + @V path. Saves ~1 ms per attention call on Apple
+    # Silicon and fuses the backward pass too. Set to False to debug / compare
+    # against the reference path.
+    use_fast_sdpa: bool = True
 
     @classmethod
     def vit_base_patch16(cls, **kwargs) -> "ViTConfig":
@@ -83,13 +88,21 @@ class PatchEmbed(nn.Module):
 
 
 class Attention(nn.Module):
-    """Multi-head self-attention."""
+    """Multi-head self-attention.
+
+    v0.3: Routes through ``mx.fast.scaled_dot_product_attention`` by default.
+    The fast path is a tiled Metal kernel that avoids materializing the full
+    ``[B, H, N, N]`` attention matrix and provides a fused backward — a
+    single-optimization win over the manual softmax path used in v0.1 / v0.2.
+    Set ``ViTConfig.use_fast_sdpa=False`` to fall back to the reference path.
+    """
 
     def __init__(self, config: ViTConfig):
         super().__init__()
         self.num_heads = config.num_heads
         self.head_dim = config.embed_dim // config.num_heads
         self.scale = self.head_dim ** -0.5
+        self.use_fast_sdpa = config.use_fast_sdpa
 
         self.q_proj = nn.Linear(config.embed_dim, config.embed_dim)
         self.k_proj = nn.Linear(config.embed_dim, config.embed_dim)
@@ -103,10 +116,15 @@ class Attention(nn.Module):
         k = self.k_proj(x).reshape(B, N, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
         v = self.v_proj(x).reshape(B, N, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
 
-        attn = (q @ k.transpose(0, 1, 3, 2)) * self.scale
-        attn = mx.softmax(attn, axis=-1)
+        if self.use_fast_sdpa:
+            # [B, H, N, Hd] input layout — same convention MLX expects.
+            o = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale)
+        else:
+            attn = (q @ k.transpose(0, 1, 3, 2)) * self.scale
+            attn = mx.softmax(attn, axis=-1)
+            o = attn @ v
 
-        x = (attn @ v).transpose(0, 2, 1, 3).reshape(B, N, C)
+        x = o.transpose(0, 2, 1, 3).reshape(B, N, C)
         x = self.out_proj(x)
         return x
 

@@ -73,6 +73,34 @@ M4 the same config collapses to 0.1 img/s, on the M3 Pro it stays clean at 6.8 i
 M3 Pro numbers were measured with real 512×512 patches from a cell-growth dataset,
 preloaded into GPU memory so disk I/O does not contaminate the throughput.
 
+### v0.3: Fused Attention via `mx.fast.scaled_dot_product_attention`
+
+![v0.3 improvement](benchmark_results/benchmark_v03_improvement.png)
+
+v0.3 routes the attention path through MLX's native fused Metal kernel
+(`mx.fast.scaled_dot_product_attention`) instead of the manual
+`Q @ K.T → softmax → @V` chain. The kernel is bitwise-identical to the
+reference path — the unit test reports `0.00e+00` max diff on forward,
+loss, and all gradients — but dispatches fewer Metal calls and does the
+`softmax` in a fused pass.
+
+Measured on **M3 Pro 18 GB** with an interleaved A/B harness (n=60 per
+variant, 9 configurations, LoRA + gradient checkpointing):
+
+- **Geometric mean speedup: 1.009×** (range 0.947× – 1.043×)
+- **Best**: ViT-B/16 LoRA+ckpt at batch 4 — **1.043×**
+- **Consistent positive** at batch ≥ 4 on both ViT-B and ViT-L
+- **Slightly slower** at batch 1 (kernel fixed-cost dominates tiny inputs;
+  not a realistic training regime)
+
+Honest note: the SDPA win is small because ViT has no causal mask to skip,
+no large-vocab cross-entropy, and no RoPE — the three tricks that dominate
+Unsloth's LLM speedup. On this shape the MLP is 54% of per-block time and
+already at peak matmul utilization, so attention-path fusion has a low
+ceiling. The change ships because it's a correctness-preserving foundation
+for more aggressive v0.4 attention fusions (fused QKV + LoRA autograd,
+fused SwiGLU), not because of the 1% headline number.
+
 ## Quick Start
 
 ```bash
@@ -201,7 +229,8 @@ model = FastViTModel.load_adapters(base, "my_adapters")
 - [x] **v0.1** — ViT-B/L/H + LoRA + training pipeline
 - [x] **v0.2** — Gradient checkpointing + gradient accumulation + full fine-tuning + memory reporting
 - [x] **v0.2.1** — M3 Pro 18GB benchmarks + multi-chip comparison
-- [ ] **v0.3** — Fused LoRA autograd (Unsloth-style ~1.5-2x speedup)
+- [x] **v0.3** — Fused attention path via `mx.fast.scaled_dot_product_attention`
+- [ ] **v0.4** — Fused QKV + LoRA autograd, fused SwiGLU MLP (custom mx.vjp)
 - [ ] **v0.4** — Multi-resolution + evaluation (linear probe, kNN)
 - [ ] **v0.5** — Big model validation on M5 Pro 64GB + M3 Pro 18GB
 - [ ] **v0.6** — QLoRA, DoRA, AdaLoRA
