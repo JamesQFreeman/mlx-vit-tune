@@ -63,7 +63,7 @@ class FastViTModel:
         arch: Optional[str] = None,
         hf_token: Optional[str] = None,
         cache_dir: Optional[str] = None,
-        dtype: str = "float32",
+        dtype: str = "bfloat16",
         gradient_checkpointing: bool = False,
     ) -> VisionTransformer:
         """Load a pretrained ViT model.
@@ -79,7 +79,11 @@ class FastViTModel:
             arch: Architecture override (e.g., "vit_base_patch16_224")
             hf_token: HuggingFace auth token for gated models
             cache_dir: Directory to cache converted weights
-            dtype: Weight dtype ("float16", "bfloat16", "float32")
+            dtype: Weight dtype. Accepts ``'bfloat16'`` / ``'bf16'`` (default),
+                ``'float32'`` / ``'fp32'``, ``'float16'`` / ``'fp16'``, or an
+                ``mx.Dtype`` value. v0.4 switched the default from fp32 to
+                bf16 — ~1.17x wall-clock on ViT-B/L training and 50% less
+                memory. Pass ``'float32'`` to recover v0.3 exact behavior.
 
         Returns:
             VisionTransformer model with loaded weights

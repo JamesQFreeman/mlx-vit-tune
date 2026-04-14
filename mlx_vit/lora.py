@@ -42,9 +42,13 @@ class LoRALinear(nn.Module):
         self.rank = rank
         self.scale = alpha / rank
 
-        # LoRA matrices — A uses Kaiming init, B is zero-initialized
-        self.lora_a = mx.random.normal((in_features, rank)) * (1.0 / rank**0.5)
-        self.lora_b = mx.zeros((rank, out_features))
+        # v0.4: match adapter dtype to the base layer so bf16 models don't
+        # have to up-cast on every forward. mx.random.normal and mx.zeros
+        # default to fp32 — cast explicitly to base.weight.dtype.
+        base_dtype = base.weight.dtype
+        scale_a = 1.0 / rank**0.5
+        self.lora_a = (mx.random.normal((in_features, rank)) * scale_a).astype(base_dtype)
+        self.lora_b = mx.zeros((rank, out_features), dtype=base_dtype)
 
         self.dropout = nn.Dropout(dropout) if dropout > 0 else None
 

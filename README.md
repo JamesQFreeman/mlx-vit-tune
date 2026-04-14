@@ -73,6 +73,49 @@ M4 the same config collapses to 0.1 img/s, on the M3 Pro it stays clean at 6.8 i
 M3 Pro numbers were measured with real 512×512 patches from a cell-growth dataset,
 preloaded into GPU memory so disk I/O does not contaminate the throughput.
 
+### v0.4: bfloat16 by Default
+
+![v0.4 improvement](benchmark_results/benchmark_v04_improvement.png)
+
+v0.4 switches `ViTConfig.dtype` and `FastViTModel.from_pretrained(dtype=...)`
+default from `float32` to **`bfloat16`**. bf16 has the same 8-bit exponent
+range as fp32 (so no overflow NaN even with random init) and 7-bit mantissa
+precision — which is sufficient for ViT fine-tuning, matches the Qwen2-VL /
+UNI2-h training recipes, and uses real hardware-accelerated bf16 matmul on
+Apple Silicon (I verified on M3 Pro: fp32 peak 3.57 TFLOPs vs bf16 peak
+5.14 TFLOPs on a 4096² square — a real 1.44× compute delta, not just a
+bandwidth trick).
+
+**Measured on M3 Pro 18 GB, interleaved A/B, n=60 per variant, LoRA + grad ckpt:**
+
+- **Geometric mean speedup: 1.259×** across 9 configurations
+- **Compute-bound configs hit the 1.44× hardware ceiling** (ViT-B bs=16, bs=32)
+- **Memory: halved** — model weights, activations, and optimizer state all
+  drop to 16 bits. ViT-B bs=32 forward peak memory dropped 2044 MB → 1022 MB
+  in isolation.
+- **No regressions**: at batch 1 (pathological micro-batch where kernel
+  launch overhead dominates), bf16 matches fp32 within noise
+- **Numerical**: bf16 output differs from fp32 output by ~1.25% relative on
+  ViT-B; test_bf16_training_step_stable verifies 10 LoRA training steps
+  converge from loss 1.85 → 0.04 with no NaN
+
+**Why this is a bigger win than v0.3 (~1%):**
+
+| v0.3 (SDPA) | v0.4 (bf16) |
+|---|---|
+| Speeds up one op (attention math) | Speeds up **every** matmul (attn + MLP) |
+| Only forward benefits (MLX has no fused SDPA backward) | Forward **and** backward benefit |
+| Forward time × ~5% saving × attn share | 44% speedup on compute-bound ops |
+| No memory delta | **~50% memory reduction** |
+
+**Correctness.** Four new regression tests verify: (1) `ViTConfig()` defaults
+to bf16, (2) bf16 ViT-L random-init forward produces no NaN / Inf with
+bounded `max_abs`, (3) bf16 output matches fp32 output within 5% relative
+with identical weights, (4) 10-step bf16 LoRA training converges.
+
+Use `ViTConfig(dtype=mx.float32)` or `FastViTModel.from_pretrained(..., dtype="float32")`
+to recover exact v0.3 behavior for debugging or reproducibility.
+
 ### v0.3: Fused Attention via `mx.fast.scaled_dot_product_attention`
 
 ![v0.3 improvement](benchmark_results/benchmark_v03_improvement.png)
@@ -230,7 +273,8 @@ model = FastViTModel.load_adapters(base, "my_adapters")
 - [x] **v0.2** — Gradient checkpointing + gradient accumulation + full fine-tuning + memory reporting
 - [x] **v0.2.1** — M3 Pro 18GB benchmarks + multi-chip comparison
 - [x] **v0.3** — Fused attention path via `mx.fast.scaled_dot_product_attention`
-- [ ] **v0.4** — Fused QKV + LoRA autograd, fused SwiGLU MLP (custom mx.vjp)
+- [x] **v0.4** — bfloat16 by default (1.26× geometric mean, 50% memory)
+- [ ] **v0.5** — Fused QKV + LoRA autograd, fused SwiGLU MLP (custom mx.vjp)
 - [ ] **v0.4** — Multi-resolution + evaluation (linear probe, kNN)
 - [ ] **v0.5** — Big model validation on M5 Pro 64GB + M3 Pro 18GB
 - [ ] **v0.6** — QLoRA, DoRA, AdaLoRA

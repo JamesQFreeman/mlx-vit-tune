@@ -34,6 +34,13 @@ class ViTConfig:
     # Silicon and fuses the backward pass too. Set to False to debug / compare
     # against the reference path.
     use_fast_sdpa: bool = True
+    # v0.4: parameter dtype for all model weights and activations. bfloat16 is
+    # the new default — it has fp32's exponent range (no overflow NaN even
+    # with random init), halves memory, and gets ~1.17x wall-clock on ViT
+    # training on Apple Silicon. Use mx.float32 for debugging / exact-match
+    # reproduction; fp16 is supported but not recommended (narrower range,
+    # needs loss scaling that we don't do).
+    dtype: "mx.Dtype" = mx.bfloat16
 
     @classmethod
     def vit_base_patch16(cls, **kwargs) -> "ViTConfig":
@@ -248,6 +255,14 @@ class VisionTransformer(nn.Module):
         if config.num_classes > 0:
             self.head = nn.Linear(self._feature_dim(), config.num_classes)
 
+        # v0.4: cast every parameter (and persistent buffer like cls_token,
+        # pos_embed, register_tokens) to config.dtype in one pass. The default
+        # is bfloat16; passing dtype=mx.float32 on the config keeps the old
+        # v0.3 behavior. nn.Module.apply walks the whole tree including
+        # attributes that are bare mx.array (not just child modules).
+        if config.dtype != mx.float32:
+            self.apply(lambda arr: arr.astype(config.dtype))
+
     def _feature_dim(self) -> int:
         """Output feature dimension based on pooling strategy."""
         if self.config.global_pool == "token+avg":
@@ -310,6 +325,14 @@ class VisionTransformer(nn.Module):
     def features(self, x: mx.array) -> mx.array:
         """Extract features without classification head."""
         B, H, W, C = x.shape
+
+        # v0.4: cast input to the model's parameter dtype at the single
+        # boundary where user data enters the network. Normalization stats
+        # stay in fp32 upstream (they're numpy arrays), and the user may
+        # pass an fp32 or fp16 tensor — we coerce once here so every
+        # downstream matmul sees matching dtypes.
+        if x.dtype != self.config.dtype:
+            x = x.astype(self.config.dtype)
 
         # Patch embedding
         x = self.patch_embed(x)

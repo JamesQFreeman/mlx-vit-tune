@@ -103,10 +103,19 @@ def report_memory(model: VisionTransformer, batch_size: int, image_size: int = 2
 
 
 def cross_entropy_loss(model: VisionTransformer, images: mx.array, labels: mx.array):
-    """Compute cross-entropy loss and accuracy."""
+    """Compute cross-entropy loss and accuracy.
+
+    v0.4: ``logits`` may arrive in bf16 when the model is bf16. The softmax
+    inside ``nn.losses.cross_entropy`` can underflow in bf16's 7-bit mantissa
+    on very small probabilities — this is the standard mixed-precision
+    recipe. We cast logits to fp32 *just for the loss computation* (cheap,
+    ``[B, num_classes]`` is tiny) so gradients flowing back into the model
+    are still numerically faithful even with bf16 weights.
+    """
     logits = model(images)
-    loss = nn.losses.cross_entropy(logits, labels, reduction="mean")
-    predictions = mx.argmax(logits, axis=-1)
+    logits_fp32 = logits.astype(mx.float32)
+    loss = nn.losses.cross_entropy(logits_fp32, labels, reduction="mean")
+    predictions = mx.argmax(logits_fp32, axis=-1)
     accuracy = mx.mean(predictions == labels)
     return loss, accuracy
 

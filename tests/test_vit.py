@@ -257,6 +257,117 @@ def test_gradient_accumulation():
     print(f"[PASS] Gradient accumulation: {len(flat_grads)} gradient tensors, all finite")
 
 
+def test_bf16_is_default():
+    """v0.4: fresh ViTConfig should produce bf16 model parameters."""
+    cfg = ViTConfig.vit_base_patch16(num_classes=5, image_size=224)
+    assert cfg.dtype == mx.bfloat16, f"Default dtype regressed to {cfg.dtype}"
+
+    model = VisionTransformer(cfg)
+    mx.eval(model.parameters())
+
+    flat = mlx.utils.tree_flatten(model.parameters())
+    non_bf16 = [(k, v.dtype) for k, v in flat
+                if isinstance(v, mx.array) and v.dtype != mx.bfloat16]
+    assert not non_bf16, f"Non-bf16 params leaked: {non_bf16[:5]}"
+    print(f"[PASS] bf16 default: {len(flat)} params all bfloat16")
+
+
+def test_bf16_forward_no_nan():
+    """v0.4: random-init bf16 ViT forward must not NaN or Inf, and input
+    data arriving in fp32 should be cast at the features() boundary."""
+    cfg = ViTConfig.vit_large_patch16(num_classes=10, image_size=224)
+    model = VisionTransformer(cfg)
+    mx.eval(model.parameters())
+
+    # Pass FP32 input — tests the boundary cast.
+    x = mx.random.normal((2, 224, 224, 3)).astype(mx.float32)
+    out = model(x)
+    mx.eval(out)
+    assert out.dtype == mx.bfloat16, f"Output dtype should be bf16, got {out.dtype}"
+    assert not bool(mx.any(mx.isnan(out)).item()), "bf16 forward produced NaN"
+    assert not bool(mx.any(mx.isinf(out)).item()), "bf16 forward produced Inf"
+    max_abs = float(mx.max(mx.abs(out)).item())
+    assert max_abs < 1e3, f"bf16 forward exploded: max_abs={max_abs}"
+    print(f"[PASS] bf16 ViT-L random-init forward: max_abs={max_abs:.3f}")
+
+
+def test_bf16_matches_fp32_within_tolerance():
+    """v0.4: a ViT built with dtype=bf16 should produce outputs within ~bf16
+    precision (~1e-2 relative) of the same ViT in fp32, when both use
+    identical weights."""
+    cfg_kwargs = dict(
+        patch_size=16, embed_dim=128, depth=4,
+        num_heads=4, num_classes=8, image_size=32,
+    )
+
+    model_fp32 = VisionTransformer(ViTConfig(dtype=mx.float32, **cfg_kwargs))
+    model_bf16 = VisionTransformer(ViTConfig(dtype=mx.bfloat16, **cfg_kwargs))
+
+    # Copy fp32 weights into bf16 model (down-casting).
+    flat_fp32 = mlx.utils.tree_flatten(model_fp32.parameters())
+    bf16_items = [(k, v.astype(mx.bfloat16)) if isinstance(v, mx.array) else (k, v)
+                  for k, v in flat_fp32]
+    model_bf16.load_weights(bf16_items, strict=False)
+    mx.eval(model_bf16.parameters())
+
+    x = mx.random.normal((2, 32, 32, 3)).astype(mx.float32)
+    out_fp32 = model_fp32(x)
+    out_bf16 = model_bf16(x).astype(mx.float32)
+    mx.eval(out_fp32, out_bf16)
+
+    abs_diff = float(mx.max(mx.abs(out_fp32 - out_bf16)).item())
+    rel_diff = abs_diff / max(float(mx.max(mx.abs(out_fp32)).item()), 1e-10)
+    # bf16 has 7 mantissa bits → relative precision ~2^-7 ≈ 8e-3. Accumulated
+    # over 4 transformer blocks, expect up to ~5e-2 relative drift.
+    assert rel_diff < 5e-2, (
+        f"bf16 diverged from fp32: abs_diff={abs_diff:.4f}, rel_diff={rel_diff:.4f}"
+    )
+    print(f"[PASS] bf16 ~= fp32 forward: abs {abs_diff:.2e}, rel {rel_diff:.2e}")
+
+
+def test_bf16_training_step_stable():
+    """v0.4: a few bf16 LoRA training steps should produce finite, decreasing
+    loss. Covers: LoRA adapters inherit bf16, fp32 logit cast in loss works,
+    bf16 gradients propagate."""
+    from mlx_vit.trainer import cross_entropy_loss
+    import mlx.optimizers as optim
+
+    cfg = ViTConfig(
+        patch_size=16, embed_dim=128, depth=3,
+        num_heads=4, num_classes=5, image_size=32,
+        gradient_checkpointing=True,
+    )
+    model = VisionTransformer(cfg)
+    model, _ = inject_lora(model, rank=4, alpha=4.0)
+    mx.eval(model.parameters())
+
+    # Verify LoRA adapters inherited bf16 from base
+    for block in model.blocks:
+        lora_q = block.attn.q_proj
+        assert lora_q.lora_a.dtype == mx.bfloat16, f"LoRA A leaked as {lora_q.lora_a.dtype}"
+        assert lora_q.lora_b.dtype == mx.bfloat16, f"LoRA B leaked as {lora_q.lora_b.dtype}"
+
+    x = mx.random.normal((4, 32, 32, 3))
+    labels = mx.array([0, 1, 2, 3])
+    mx.eval(x, labels)
+
+    loss_fn = nn.value_and_grad(model, cross_entropy_loss)
+    opt = optim.AdamW(learning_rate=1e-3)
+
+    losses = []
+    for step in range(10):
+        (loss, _), grads = loss_fn(model, x, labels)
+        opt.update(model, grads)
+        mx.eval(loss, model.parameters(), opt.state)
+        loss_val = loss.item()
+        assert not (loss_val != loss_val), f"NaN loss at step {step}"  # NaN check
+        losses.append(loss_val)
+
+    first, last = losses[0], losses[-1]
+    assert last < first, f"bf16 LoRA training didn't converge: {first:.3f} -> {last:.3f}"
+    print(f"[PASS] bf16 LoRA training: loss {first:.3f} -> {last:.3f} over 10 steps")
+
+
 def test_save_checkpoint_full_ft():
     """Regression: ``_save_checkpoint`` used to call ``mx.savez(**dict(model.
     parameters()))`` directly, but ``model.parameters()`` is a NESTED dict
@@ -296,13 +407,19 @@ def test_save_checkpoint_full_ft():
 
 def test_fast_sdpa_matches_manual():
     """v0.3: mx.fast.scaled_dot_product_attention path must produce the same
-    logits and (more importantly) the same gradients as the manual path."""
+    logits and (more importantly) the same gradients as the manual path.
+
+    Pinned to float32 — this is a correctness test of the SDPA kernel vs
+    the manual softmax path, not a precision test. The looser bf16 tolerance
+    is covered separately in ``test_bf16_matches_fp32_within_tolerance``.
+    """
     # Small ViT so the test is fast but still exercises multi-head attention
     # and gradient checkpointing.
     cfg_kwargs = dict(
         patch_size=16, embed_dim=64, depth=3,
         num_heads=4, num_classes=5, image_size=32,
         gradient_checkpointing=True,
+        dtype=mx.float32,
     )
 
     model_manual = VisionTransformer(ViTConfig(use_fast_sdpa=False, **cfg_kwargs))
@@ -393,6 +510,12 @@ if __name__ == "__main__":
 
     print("\n--- v0.3 tests ---\n")
     test_fast_sdpa_matches_manual()
+
+    print("\n--- v0.4 tests ---\n")
+    test_bf16_is_default()
+    test_bf16_forward_no_nan()
+    test_bf16_matches_fp32_within_tolerance()
+    test_bf16_training_step_stable()
 
     print("\n--- Regressions ---\n")
     test_save_checkpoint_full_ft()
