@@ -1,0 +1,56 @@
+[
+  {
+    "backend": "pytorch_cpu",
+    "arch": "vit_b",
+    "bs": 32,
+    "mean_ms": 4881.02,
+    "std_ms": 80.78,
+    "img_s": 6.56,
+    "peak_mb": 1540.1
+  },
+  {
+    "backend": "pytorch_mps",
+    "arch": "vit_b",
+    "bs": 32,
+    "mean_ms": 1473.41,
+    "std_ms": 7.99,
+    "img_s": 21.72,
+    "peak_mb": 2512.9
+  },
+  {
+    "backend": "mlx_vit_tune_v04",
+    "arch": "vit_b",
+    "bs": 32,
+    "mean_ms": 360.06,
+    "std_ms": 2.61,
+    "img_s": 88.87,
+    "peak_mb": 1015.9
+  },
+  {
+    "backend": "pytorch_cpu",
+    "arch": "vit_l",
+    "bs": 16,
+    "mean_ms": 7658.12,
+    "std_ms": 22.73,
+    "img_s": 2.09,
+    "peak_mb": 2175.4
+  },
+  {
+    "backend": "pytorch_mps",
+    "arch": "vit_l",
+    "bs": 16,
+    "mean_ms": 2267.28,
+    "std_ms": 6.36,
+    "img_s": 7.06,
+    "peak_mb": 3377.3
+  },
+  {
+    "backend": "mlx_vit_tune_v04",
+    "arch": "vit_l",
+    "bs": 16,
+    "mean_ms": 572.1,
+    "std_ms": 11.97,
+    "img_s": 27.97,
+    "peak_mb": 1432.3
+  }
+]

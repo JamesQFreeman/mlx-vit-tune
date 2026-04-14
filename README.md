@@ -1,72 +1,31 @@
 # mlx-vit-tune
 
-Fine-tune Vision Transformers on Apple Silicon with MLX. LoRA and full fine-tuning with an Unsloth-like API.
+Fast Vision Transformer fine-tuning on Apple Silicon with MLX. LoRA and
+full fine-tuning with an Unsloth-like API.
 
 From the creator of [LoRA-ViT](https://github.com/JamesQFreeman/LoRA-ViT) — now natively on Mac.
 
-## Why
-
-- No MLX ViT fine-tuning pipeline exists
-- Apple Silicon's unified memory lets you fine-tune ViT-B/L/H locally
-- Gradient checkpointing makes LoRA 2x faster and uses 80% less memory
-- Supports both LoRA and full fine-tuning
-
 ## Benchmark
 
-Historical tables (Full FT, peak memory, ViT-L) are **v0.2** on **Apple M4 16GB, fp32**.
-The **ViT-B LoRA table below** shows the current **v0.4** release (bf16 + fused SDPA
-+ gradient checkpointing) on **Apple M3 Pro 18GB**.
+Three-way comparison on **Apple M3 Pro 18 GB**, ViT + LoRA (rank 8, all
+linear layers) + gradient checkpointing. Each bar is the best realistic
+setup for that backend: PyTorch runs fp32, mlx-vit-tune v0.4 runs its
+default bf16 + `mx.fast.scaled_dot_product_attention`.
 
-![Benchmark](benchmark_results/benchmark_v02.png)
+![Training throughput](benchmark_results/hero_speed.png)
 
-### ViT-B/16 LoRA Training (img/s)
+![Peak training memory](benchmark_results/hero_memory.png)
 
-| Batch | CPU | MLX | mlx-vit-tune v0.4 | Total speedup |
-|:---:|:---:|:---:|:---:|:---:|
-| 1 | 4.5 | 11.9 | **30.6** | **6.8x** |
-| 4 | 8.2 | 16.6 | **65.8** | **8.0x** |
-| 8 | 8.0 | 17.2 | **78.3** | **9.8x** |
-| 16 | 8.5 | 17.5 | **87.6** | **10.3x** |
-| 32 | — | 17.6 | **93.1** | — |
+| Config | PyTorch CPU | PyTorch MPS | **mlx-vit-tune v0.4** | vs MPS | vs CPU |
+|:---|:---:|:---:|:---:|:---:|:---:|
+| ViT-B/16  bs=32  throughput | 6.6 img/s | 21.7 img/s | **88.9 img/s** | **4.1×** | **13.5×** |
+| ViT-L/16  bs=16  throughput | 2.1 img/s | 7.1 img/s | **28.0 img/s** | **3.9×** | **13.3×** |
+| ViT-B/16  bs=32  peak mem | 1.50 GB | 2.45 GB | **0.99 GB** | **2.5× less** | **1.5× less** |
+| ViT-L/16  bs=16  peak mem | 2.12 GB | 3.30 GB | **1.40 GB** | **2.4× less** | **1.5× less** |
 
-> **CPU** = PyTorch CPU, M4 16GB (v0.1 baseline). **MLX** = vanilla MLX fp32
-> on M4 16GB, no optimizations. **mlx-vit-tune v0.4** = M3 Pro 18GB with
-> bf16 + `mx.fast.scaled_dot_product_attention` + gradient checkpointing.
-> The speedup column combines the M4→M3 Pro hardware upgrade with the
-> v0.1→v0.4 software optimizations. See the Version History section for
-> the software-only delta on the same hardware.
-
-### ViT-B/16 Full Fine-Tuning (img/s)
-
-| Batch | MLX | mlx-vit-tune | Peak Memory |
-|:---:|:---:|:---:|:---:|
-| 1 | 5.8 | 5.4 | 1.9 GB |
-| 8 | 14.4 | 14.0 | 1.9 GB |
-| 16 | 15.3 | 15.3 | 1.9 GB |
-| 32 | 15.8 | **15.9** | **2.8 GB** |
-
-> Full FT speed is similar with or without checkpointing, but memory drops dramatically at large batches (8.3 GB &rarr; 2.9 GB at batch 32).
-
-### Peak Memory (MB) — LoRA
-
-| Batch | MLX | mlx-vit-tune | Saved |
-|:---:|:---:|:---:|:---:|
-| 1 | 573 | **372** | 35% |
-| 4 | 1,256 | **451** | 64% |
-| 8 | 2,165 | **557** | 74% |
-| 16 | 3,982 | **768** | 81% |
-| 32 | 7,615 | **1,190** | 84% |
-
-### ViT-L/16 LoRA — Now Trainable on 16GB
-
-| Batch | MLX (img/s) | mlx-vit-tune (img/s) | MLX Peak | mlx-vit-tune Peak |
-|:---:|:---:|:---:|:---:|:---:|
-| 1 | 4.2 | **8.3** | 1,756 MB | **1,241 MB** |
-| 2 | 5.1 | **10.5** | 2,311 MB | **1,269 MB** |
-| 4 | 5.5 | **11.6** | 3,419 MB | **1,339 MB** |
-| 8 | 5.6 | **12.4** | 5,639 MB | **1,479 MB** |
-
-ViT-L with 304M parameters trains comfortably at batch 8, using under 1.5 GB peak memory with gradient checkpointing.
+Reproduce with `python scripts/bench_3way.py` (requires `torch`, `timm`,
+`peft`, `psutil`). Raw numbers: [`bench_3way.json`](benchmark_results/bench_3way.json).
+Per-release deltas (v0.2 → v0.3 → v0.4) live in the [Version History](#version-history).
 
 ## Quick Start
 
