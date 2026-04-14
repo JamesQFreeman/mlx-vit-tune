@@ -13,22 +13,28 @@ From the creator of [LoRA-ViT](https://github.com/JamesQFreeman/LoRA-ViT) — no
 
 ## Benchmark
 
-ViT-B and ViT-L tables below measured on **Apple M4 16GB, float32**. A
-multi-chip comparison vs **Apple M3 Pro 18GB** follows.
+Historical tables (Full FT, peak memory, ViT-L) are **v0.2** on **Apple M4 16GB, fp32**.
+The **ViT-B LoRA table below** shows the current **v0.4** release (bf16 + fused SDPA
++ gradient checkpointing) on **Apple M3 Pro 18GB**.
 
 ![Benchmark](benchmark_results/benchmark_v02.png)
 
 ### ViT-B/16 LoRA Training (img/s)
 
-| Batch | CPU | MLX | mlx-vit-tune | Speedup vs CPU |
+| Batch | CPU | MLX | mlx-vit-tune v0.4 | Total speedup |
 |:---:|:---:|:---:|:---:|:---:|
-| 1 | 4.5 | 11.9 | **23.5** | **5.2x** |
-| 4 | 8.2 | 16.6 | **34.9** | **4.3x** |
-| 8 | 8.0 | 17.2 | **36.3** | **4.5x** |
-| 16 | 8.5 | 17.5 | **39.8** | **4.7x** |
-| 32 | — | 17.6 | **37.6** | — |
+| 1 | 4.5 | 11.9 | **30.6** | **6.8x** |
+| 4 | 8.2 | 16.6 | **65.8** | **8.0x** |
+| 8 | 8.0 | 17.2 | **78.3** | **9.8x** |
+| 16 | 8.5 | 17.5 | **87.6** | **10.3x** |
+| 32 | — | 17.6 | **93.1** | — |
 
-> **CPU** = PyTorch on CPU. **MLX** = vanilla MLX, no checkpointing. **mlx-vit-tune** = MLX + gradient checkpointing.
+> **CPU** = PyTorch CPU, M4 16GB (v0.1 baseline). **MLX** = vanilla MLX fp32
+> on M4 16GB, no optimizations. **mlx-vit-tune v0.4** = M3 Pro 18GB with
+> bf16 + `mx.fast.scaled_dot_product_attention` + gradient checkpointing.
+> The speedup column combines the M4→M3 Pro hardware upgrade with the
+> v0.1→v0.4 software optimizations. See the Version History section for
+> the software-only delta on the same hardware.
 
 ### ViT-B/16 Full Fine-Tuning (img/s)
 
@@ -61,88 +67,6 @@ multi-chip comparison vs **Apple M3 Pro 18GB** follows.
 | 8 | 5.6 | **12.4** | 5,639 MB | **1,479 MB** |
 
 ViT-L with 304M parameters trains comfortably at batch 8, using under 1.5 GB peak memory with gradient checkpointing.
-
-### Multi-Chip Comparison: M4 16GB vs M3 Pro 18GB
-
-![Comparison](benchmark_results/benchmark_comparison.png)
-
-The M3 Pro's wider GPU (14 cores vs 10) and faster memory bus (150 GB/s vs 120 GB/s)
-deliver a consistent **1.5–1.6× speedup** across every configuration. The extra 2 GB
-of unified memory also lets ViT-L Full FT run at batch 8 without thrashing — on the
-M4 the same config collapses to 0.1 img/s, on the M3 Pro it stays clean at 6.8 img/s.
-M3 Pro numbers were measured with real 512×512 patches from a cell-growth dataset,
-preloaded into GPU memory so disk I/O does not contaminate the throughput.
-
-### v0.4: bfloat16 by Default
-
-![v0.4 improvement](benchmark_results/benchmark_v04_improvement.png)
-
-v0.4 switches `ViTConfig.dtype` and `FastViTModel.from_pretrained(dtype=...)`
-default from `float32` to **`bfloat16`**. bf16 has the same 8-bit exponent
-range as fp32 (so no overflow NaN even with random init) and 7-bit mantissa
-precision — which is sufficient for ViT fine-tuning, matches the Qwen2-VL /
-UNI2-h training recipes, and uses real hardware-accelerated bf16 matmul on
-Apple Silicon (I verified on M3 Pro: fp32 peak 3.57 TFLOPs vs bf16 peak
-5.14 TFLOPs on a 4096² square — a real 1.44× compute delta, not just a
-bandwidth trick).
-
-**Measured on M3 Pro 18 GB, interleaved A/B, n=60 per variant, LoRA + grad ckpt:**
-
-- **Geometric mean speedup: 1.259×** across 9 configurations
-- **Compute-bound configs hit the 1.44× hardware ceiling** (ViT-B bs=16, bs=32)
-- **Memory: halved** — model weights, activations, and optimizer state all
-  drop to 16 bits. ViT-B bs=32 forward peak memory dropped 2044 MB → 1022 MB
-  in isolation.
-- **No regressions**: at batch 1 (pathological micro-batch where kernel
-  launch overhead dominates), bf16 matches fp32 within noise
-- **Numerical**: bf16 output differs from fp32 output by ~1.25% relative on
-  ViT-B; test_bf16_training_step_stable verifies 10 LoRA training steps
-  converge from loss 1.85 → 0.04 with no NaN
-
-**Why this is a bigger win than v0.3 (~1%):**
-
-| v0.3 (SDPA) | v0.4 (bf16) |
-|---|---|
-| Speeds up one op (attention math) | Speeds up **every** matmul (attn + MLP) |
-| Only forward benefits (MLX has no fused SDPA backward) | Forward **and** backward benefit |
-| Forward time × ~5% saving × attn share | 44% speedup on compute-bound ops |
-| No memory delta | **~50% memory reduction** |
-
-**Correctness.** Four new regression tests verify: (1) `ViTConfig()` defaults
-to bf16, (2) bf16 ViT-L random-init forward produces no NaN / Inf with
-bounded `max_abs`, (3) bf16 output matches fp32 output within 5% relative
-with identical weights, (4) 10-step bf16 LoRA training converges.
-
-Use `ViTConfig(dtype=mx.float32)` or `FastViTModel.from_pretrained(..., dtype="float32")`
-to recover exact v0.3 behavior for debugging or reproducibility.
-
-### v0.3: Fused Attention via `mx.fast.scaled_dot_product_attention`
-
-![v0.3 improvement](benchmark_results/benchmark_v03_improvement.png)
-
-v0.3 routes the attention path through MLX's native fused Metal kernel
-(`mx.fast.scaled_dot_product_attention`) instead of the manual
-`Q @ K.T → softmax → @V` chain. The kernel is bitwise-identical to the
-reference path — the unit test reports `0.00e+00` max diff on forward,
-loss, and all gradients — but dispatches fewer Metal calls and does the
-`softmax` in a fused pass.
-
-Measured on **M3 Pro 18 GB** with an interleaved A/B harness (n=60 per
-variant, 9 configurations, LoRA + gradient checkpointing):
-
-- **Geometric mean speedup: 1.009×** (range 0.947× – 1.043×)
-- **Best**: ViT-B/16 LoRA+ckpt at batch 4 — **1.043×**
-- **Consistent positive** at batch ≥ 4 on both ViT-B and ViT-L
-- **Slightly slower** at batch 1 (kernel fixed-cost dominates tiny inputs;
-  not a realistic training regime)
-
-Honest note: the SDPA win is small because ViT has no causal mask to skip,
-no large-vocab cross-entropy, and no RoPE — the three tricks that dominate
-Unsloth's LLM speedup. On this shape the MLP is 54% of per-block time and
-already at peak matmul utilization, so attention-path fusion has a low
-ceiling. The change ships because it's a correctness-preserving foundation
-for more aggressive v0.4 attention fusions (fused QKV + LoRA autograd,
-fused SwiGLU), not because of the 1% headline number.
 
 ## Quick Start
 
@@ -267,6 +191,76 @@ base = FastViTModel.from_pretrained("vit_base_patch16_224", num_classes=10)
 model = FastViTModel.load_adapters(base, "my_adapters")
 ```
 
+## Version History
+
+### v0.4 — bfloat16 by default
+
+![v0.4 improvement](benchmark_results/benchmark_v04_improvement.png)
+
+`ViTConfig.dtype` defaults to `mx.bfloat16`. bf16 has fp32's 8-bit exponent
+range (no overflow NaN even with random init) and 7 mantissa bits — enough
+for ViT fine-tuning and matching the training recipes of Qwen2-VL / UNI2-h /
+SigLIP / DINOv2. Apple Silicon has real hardware-accelerated bf16 matmul
+(M3 Pro peaks at 3.57 TFLOPs fp32 vs 5.14 TFLOPs bf16 on a 4096² square —
+a real 1.44× compute delta, not just a bandwidth trick).
+
+Measured on M3 Pro 18 GB, interleaved A/B, n=60 per variant, LoRA + grad ckpt:
+
+- **Geometric mean speedup: 1.259×** across 9 configurations
+- Compute-bound configs (ViT-B bs ≥ 16) hit the **1.44× hardware ceiling**
+- **Memory halved** — weights, activations, optimizer state all drop to 16 bits
+- bf16 output differs from fp32 by ~1.25% relative; 10-step bf16 LoRA training
+  converges from loss 1.85 → 0.04 with no NaN (regression tested)
+
+Recover exact v0.3 behavior with `ViTConfig(dtype=mx.float32)` or
+`FastViTModel.from_pretrained(..., dtype="float32")`.
+
+### v0.3 — Fused attention via `mx.fast.scaled_dot_product_attention`
+
+![v0.3 improvement](benchmark_results/benchmark_v03_improvement.png)
+
+The `Attention` module routes through MLX's native fused Metal SDPA kernel
+instead of the manual `Q @ K.T → softmax → @V` chain. Bitwise-identical
+to the reference path (0.00e+00 max diff on forward, loss, and gradients)
+but dispatches fewer Metal calls and fuses the softmax.
+
+Measured on M3 Pro 18 GB, interleaved A/B, n=60 per variant:
+
+- Geometric mean speedup: **1.009×** (range 0.947× – 1.043×)
+- Consistent positive at batch ≥ 4; slightly slower at batch 1 where kernel
+  fixed cost dominates (not a realistic training regime)
+
+The SDPA win is small because ViT has no causal mask to skip, no large-vocab
+cross-entropy, and no RoPE — the three tricks that dominate Unsloth's LLM
+speedup. On this shape, MLP is 54% of per-block time and already at peak
+matmul utilization. Ships primarily as a correctness-preserving foundation
+for more aggressive v0.5+ attention fusions.
+
+### v0.2.1 — M3 Pro 18GB benchmarks + multi-chip comparison
+
+![M4 vs M3 Pro](benchmark_results/benchmark_comparison.png)
+
+Added a full v0.2 benchmark sweep on M3 Pro 18GB. The M3 Pro's wider GPU
+(14 cores vs 10) and faster memory bus (150 GB/s vs 120 GB/s) deliver a
+consistent **1.5–1.6× speedup** per configuration. The extra 2 GB of unified
+memory also lets ViT-L Full FT run at batch 8 without thrashing — on M4 it
+collapses to 0.1 img/s, on M3 Pro it stays clean at 6.8 img/s.
+
+### v0.2 — Gradient checkpointing + memory reporting
+
+`mx.checkpoint` wraps every transformer block, cutting activation memory at
+the cost of ~33% extra forward compute. ViT-L LoRA becomes trainable on
+16 GB (batch 1–2 without ckpt, batch 8 with). Gradient accumulation and
+memory reporting utilities land at the same time.
+
+### v0.1 — Initial release
+
+ViT-B / ViT-L / ViT-H with optional SwiGLU + register tokens (UNI2-h,
+Virchow2 architectures), LoRA with all-linear-layer targeting (not just
+attention — MLP layers hold ~2/3 of ViT params), HuggingFace weight
+conversion, AdamW training loop with cosine / linear / constant LR
+schedules, and the `FastViTModel` Unsloth-style API.
+
 ## Roadmap
 
 - [x] **v0.1** — ViT-B/L/H + LoRA + training pipeline
@@ -274,11 +268,10 @@ model = FastViTModel.load_adapters(base, "my_adapters")
 - [x] **v0.2.1** — M3 Pro 18GB benchmarks + multi-chip comparison
 - [x] **v0.3** — Fused attention path via `mx.fast.scaled_dot_product_attention`
 - [x] **v0.4** — bfloat16 by default (1.26× geometric mean, 50% memory)
-- [ ] **v0.5** — Fused QKV + LoRA autograd, fused SwiGLU MLP (custom mx.vjp)
-- [ ] **v0.4** — Multi-resolution + evaluation (linear probe, kNN)
-- [ ] **v0.5** — Big model validation on M5 Pro 64GB + M3 Pro 18GB
-- [ ] **v0.6** — QLoRA, DoRA, AdaLoRA
-- [ ] **v0.7** — Model zoo, docs, PyPI
+- [ ] **v0.5** — Fused QKV + LoRA autograd, fused SwiGLU MLP (custom `mx.vjp`)
+- [ ] **v0.6** — Multi-resolution + evaluation (linear probe, kNN)
+- [ ] **v0.7** — QLoRA, DoRA, AdaLoRA
+- [ ] **v0.8** — Big model validation on M5 Pro 64GB, model zoo, docs, PyPI
 
 ## Related Projects
 
